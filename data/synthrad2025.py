@@ -42,24 +42,29 @@ def build_transforms(
     all_keys   = image_keys + ["mask"]
  
     def resize_hw(data: dict) -> dict:
-        """볼륨 (D, H, W)의 H, W를 spatial_size로 리사이즈.
-        이미지: trilinear, 마스크: nearest.
-        """
         for key in all_keys:
             if key not in data:
                 continue
             img = data[key]
             if not isinstance(img, torch.Tensor):
                 img = torch.as_tensor(img)
-            mode       = "nearest"         if key == "mask" else "trilinear"
-            align      = None              if key == "mask" else False
-            img_5d     = img.unsqueeze(0).unsqueeze(0).float()   # (1,1,D,H,W)
-            target     = (img.shape[0], *spatial_size)           # (D, tH, tW)
-            resized    = F.interpolate(img_5d, size=target,
-                                       mode=mode, align_corners=align)
-            data[key]  = resized.squeeze(0).squeeze(0)
-        return data
- 
+            
+            mode  = "nearest" if key == "mask" else "bilinear"
+            align = None      if key == "mask" else False
+
+            if img.ndim == 2:
+                # (H, W) → (1, H, W) 로 unsqueeze 후 처리
+                img = img.unsqueeze(0)
+
+            # img: (D, H, W)
+            resized_slices = []
+            for d in range(img.shape[0]):
+                sl   = img[d].unsqueeze(0).unsqueeze(0).float()  # (1, 1, H, W)
+                sl_r = F.interpolate(sl, size=spatial_size, mode=mode, align_corners=align)
+                resized_slices.append(sl_r.squeeze(0).squeeze(0))  # (tH, tW)
+
+            data[key] = torch.stack(resized_slices, dim=0)  # (D, tH, tW)
+        return data    
     transforms = [resize_hw]
  
     if augment:

@@ -1,18 +1,18 @@
 """stage1_vqvae.py — VQVAE 학습 (Stage 1).
 
-데이터: SynthRad2025, (B, 9, 128, 128) → latent (B, 1, 32, 32)
-출력: 중앙 슬라이스 (B, 1, 128, 128)
+데이터: SynthRad2025
+  - in:  (B, N, H, W)  N = in_channels (슬라이스 수)
+  - out: (B, 1, H, W)  중앙 슬라이스만
 로깅: WandB
 """
 from __future__ import annotations
 
 import argparse
 import pathlib
-import random
 
 import torch
 from torch.nn import L1Loss
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 from tqdm.auto import tqdm
 
 from monai.losses.adversarial_loss import PatchAdversarialLoss
@@ -22,11 +22,11 @@ from monai.utils import set_determinism
 
 from data.synthrad2025 import SynthRad2025, build_transforms
 from models.lvdm.utils import get_lr, setup_scheduler
-from utils.wandb import finish, init_wandb, log_images, log_train
+from utils.wandb import finish, init_wandb, log_images, log_train, log_val
 
 
 # ---------------------------------------------------------------------------
-# torcheval 없이 Mean 직접 구현
+# Mean (torcheval 대체)
 # ---------------------------------------------------------------------------
 
 class Mean:
@@ -53,9 +53,8 @@ class Mean:
 # ---------------------------------------------------------------------------
 
 def to_3ch(x: torch.Tensor) -> torch.Tensor:
-    """(B, C, H, W) → 중앙 슬라이스 1채널 → (B, 3, H, W). LPIPS용."""
-    mid = x.shape[1] // 2
-    return x[:, mid:mid + 1].repeat(1, 3, 1, 1)
+    """(B, 1, H, W) → (B, 3, H, W). LPIPS용."""
+    return x.repeat(1, 3, 1, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -64,31 +63,34 @@ def to_3ch(x: torch.Tensor) -> torch.Tensor:
 
 def get_args():
     p = argparse.ArgumentParser(description="Stage1 VQVAE 학습")
+    # 데이터
     p.add_argument("--data_root",      type=str,   default="/home/dministrator/s2025")
     p.add_argument("--anatomy",        nargs="+",  default=["AB", "HN", "TH"])
-    p.add_argument("--spatial_size",   type=int,   default=128)
+    p.add_argument("--spatial_size",   type=int,   default=256)
     p.add_argument("--num_workers",    type=int,   default=4)
+    p.add_argument("--val_ratio",      type=float, default=0.2)
+    p.add_argument("--modality",       type=str,   default="ct", choices=["cbct", "ct"])
+    # 모델
     p.add_argument("--in_channels",    type=int,   default=9)
     p.add_argument("--embedding_dim",  type=int,   default=1)
     p.add_argument("--num_embeddings", type=int,   default=2048)
+    p.add_argument("--latent_size",    type=int,   default=32, choices=[16, 32, 64])
+    # 학습
     p.add_argument("--device",         type=int,   default=0)
     p.add_argument("--seed",           type=int,   default=42)
-    p.add_argument("--batch_size",     type=int,   default=64)
-    p.add_argument("--num_epochs",     type=int,   default=1)
+    p.add_argument("--batch_size",     type=int,   default=128)
+    p.add_argument("--num_epochs",     type=int,   default=1000)
     p.add_argument("--lr_g",           type=float, default=1e-4)
     p.add_argument("--lr_d",           type=float, default=5e-5)
     p.add_argument("--adv_weight",     type=float, default=0.01)
     p.add_argument("--perc_weight",    type=float, default=0.001)
     p.add_argument("--amp",            action="store_true", default=True)
-    p.add_argument("--save_interval",  type=int,   default=1)
+    # 체크포인트 / WandB
     p.add_argument("--checkpoint_dir", type=str,   default="checkpoints/stage1_vqvae")
     p.add_argument("--resume",         type=str,   default=None)
     p.add_argument("--wandb_project",  type=str,   default="cbct2ct-stage1")
     p.add_argument("--wandb_entity",   type=str,   default=None)
-    p.add_argument("--exp_name",       type=str,   default="vqvae_n9_128")
-    p.add_argument("--modality", type=str, default="ct", choices=["cbct", "ct"])
-    p.add_argument("--latent_size", type=int, default=32, choices=[16, 32, 64])
-
+    p.add_argument("--exp_name",       type=str,   default="vqvae_ct_n9_32")
     return p.parse_args()
 
 
@@ -119,32 +121,49 @@ def main():
 
     # ── 데이터 ───────────────────────────────────────────────────────────────
     ss = (args.spatial_size, args.spatial_size)
-    train_ds = SynthRad2025(
-        root=f"{args.data_root}/dataset/train/n9",
-        modality=["cbct", "ct"],
+    full_ds = SynthRad2025(
+        root=f"{args.data_root}/dataset/train/n{args.in_channels}",
+        modality=[args.modality],
         anatomy=args.anatomy,
-        transform=build_transforms(["cbct", "ct"], spatial_size=ss, augment=True),
+        transform=build_transforms([args.modality], spatial_size=ss, augment=True),
     )
+
+    n_total = len(full_ds)
+    n_val   = int(n_total * args.val_ratio)
+    n_train = n_total - n_val
+    train_ds, val_ds = random_split(
+        full_ds,
+        [n_train, n_val],
+        generator=torch.Generator().manual_seed(args.seed),
+    )
+    print(f"train: {n_train}, val: {n_val}")
+
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size,
         shuffle=True, num_workers=args.num_workers, drop_last=True, pin_memory=True,
     )
-    print(f"train: {len(train_ds)}")
+    val_loader = DataLoader(
+        val_ds, batch_size=args.batch_size,
+        shuffle=False, num_workers=args.num_workers, pin_memory=True,
+    )
 
+    # ── 모델 ─────────────────────────────────────────────────────────────────
     if args.latent_size == 64:
         down = ((2, 4, 1, 1), (1, 3, 1, 1), (1, 3, 1, 1), (1, 3, 1, 1))
         up   = ((1, 3, 1, 1, 0), (1, 3, 1, 1, 0), (1, 3, 1, 1, 0), (2, 4, 1, 1, 0))
     elif args.latent_size == 32:
         down = ((2, 4, 1, 1), (2, 4, 1, 1), (1, 3, 1, 1), (1, 3, 1, 1))
         up   = ((1, 3, 1, 1, 0), (1, 3, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0))
-    elif args.latent_size == 16:
+    else:  # 16
         down = ((2, 4, 1, 1), (2, 4, 1, 1), (2, 4, 1, 1), (1, 3, 1, 1))
         up   = ((1, 3, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0))
 
+    mid = args.in_channels // 2  # 중앙 슬라이스 index
+
     model = VQVAE(
         spatial_dims=2,
-        in_channels=args.in_channels,   # 9
-        out_channels=1,                 # 중앙 슬라이스만 출력
+        in_channels=args.in_channels,
+        out_channels=1,
         channels=(128, 256, 512, 512),
         num_res_channels=256,
         num_res_layers=2,
@@ -173,6 +192,10 @@ def main():
     adv_loss = PatchAdversarialLoss(criterion="least_squares")
 
     # ── Resume ───────────────────────────────────────────────────────────────
+    best_val_loss = float("inf")
+    patience_counter = 0
+    PATIENCE = 20
+
     start_epoch = 1
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device)
@@ -185,9 +208,11 @@ def main():
         start_epoch = ckpt["epoch"] + 1
         print(f"[resume] epoch {start_epoch}부터 재개")
 
+    # ── 학습 루프 ─────────────────────────────────────────────────────────────
     epbar = tqdm(range(start_epoch, args.num_epochs + 1), desc="Training", position=0)
 
     for epoch in epbar:
+        # ── Train ──
         model.train()
         discriminator.train()
 
@@ -196,26 +221,23 @@ def main():
 
         bbar = tqdm(train_loader, desc=f"Epoch {epoch}", leave=False, position=1)
         for batch in bbar:
-            data = batch[args.modality].to(device)
-            target = data[:, 4:5].float()          # (B, 1, 128, 128) 중앙 슬라이스 GT
+            data   = batch[args.modality].to(device)    # (B, N, H, W)
+            target = data[:, mid:mid+1].float()          # (B, 1, H, W)
 
-            # ── Generator ──
+            # Generator
             optimizer_g.zero_grad()
             with torch.amp.autocast("cuda", enabled=args.amp, dtype=torch.bfloat16):
-                recon, vq_loss = model(images=data)                    # (B, 1, 128, 128)
+                recon, vq_loss = model(images=data)
                 logits_fake    = discriminator(recon.contiguous().float())[-1]
                 recon_loss     = l1_loss(recon.float(), target)
-                p_loss         = perceptual_loss(
-                                     to_3ch(recon.float()),
-                                     to_3ch(target),
-                                 )
+                p_loss         = perceptual_loss(to_3ch(recon.float()), to_3ch(target))
                 gen_loss       = adv_loss(logits_fake, target_is_real=True, for_discriminator=False)
                 loss_g         = recon_loss + vq_loss + args.perc_weight * p_loss + args.adv_weight * gen_loss
 
             loss_g.backward()
             optimizer_g.step()
 
-            # ── Discriminator ──
+            # Discriminator
             optimizer_d.zero_grad()
             with torch.amp.autocast("cuda", enabled=args.amp, dtype=torch.bfloat16):
                 logits_fake = discriminator(recon.contiguous().detach())[-1]
@@ -234,44 +256,69 @@ def main():
             tm["perceptual_loss"].update(p_loss)
             tm["perplexity"].update(model.quantizer.perplexity)
 
-            bbar.set_postfix(
-                recon=f"{recon_loss.item():.4f}",
-                vq=f"{vq_loss.item():.4f}",
-                mod=args.modality,
-            )
+            bbar.set_postfix(recon=f"{recon_loss.item():.4f}", vq=f"{vq_loss.item():.4f}")
 
         train_vals = {k: v.compute().item() for k, v in tm.items()}
         log_train(train_vals, epoch)
+
+        # ── Val ──
+        model.eval()
+        vm = {k: Mean(device=device) for k in ["recon_loss", "perceptual_loss"]}
+
+        with torch.no_grad():
+            for step, batch in enumerate(tqdm(val_loader, desc="Val", leave=False)):
+                data   = batch[args.modality].to(device)
+                target = data[:, mid:mid+1].float()
+
+                with torch.amp.autocast("cuda", enabled=args.amp, dtype=torch.bfloat16):
+                    recon, _ = model(images=data)
+                    recon_loss = l1_loss(recon.float(), target)
+                    p_loss     = perceptual_loss(to_3ch(recon.float()), to_3ch(target))
+
+                vm["recon_loss"].update(recon_loss)
+                vm["perceptual_loss"].update(p_loss)
+
+                if step == 0:
+                    log_images("val/input_mid", data[:, mid:mid+1].detach().float(), epoch)
+                    log_images("val/recon",     recon.detach().float(),              epoch)
+
+        val_vals = {k: v.compute().item() for k, v in vm.items()}
+        log_val(val_vals, epoch)
 
         scheduler_g.step()
         scheduler_d.step()
 
         epbar.set_postfix(
             recon=f"{train_vals['recon_loss']:.4f}",
+            val_recon=f"{val_vals['recon_loss']:.4f}",
             vq=f"{train_vals['vq_loss']:.4f}",
             lr=f"{get_lr(optimizer_g):.2e}",
         )
 
-        if epoch % args.save_interval == 0:
-            # 이미지 로깅
-            log_images("train/input_mid", data[:, 4:5].float(), epoch)
-            log_images("train/recon",     recon.float(),        epoch)
-
-            # 체크포인트 저장
-            ckpt_path = ckpt_dir / f"epoch_{epoch:04d}.pt"
+        # ── best model 저장 & early stopping ──
+        if val_vals["recon_loss"] < best_val_loss:
+            best_val_loss = val_vals["recon_loss"]
+            patience_counter = 0
+            best_path = ckpt_dir / "best.pt"
             torch.save({
                 "epoch":                    epoch,
+                "best_val_loss":            best_val_loss,
                 "model_state_dict":         model.state_dict(),
                 "discriminator_state_dict": discriminator.state_dict(),
                 "optimizer_g_state_dict":   optimizer_g.state_dict(),
                 "optimizer_d_state_dict":   optimizer_d.state_dict(),
                 "scheduler_g_state_dict":   scheduler_g.state_dict(),
                 "scheduler_d_state_dict":   scheduler_d.state_dict(),
-            }, ckpt_path)
-            print(f"[saved] {ckpt_path}")
+            }, best_path)
+            print(f"[best] epoch {epoch} val_recon={best_val_loss:.4f} → saved")
+        else:
+            patience_counter += 1
+            print(f"[patience] {patience_counter}/{PATIENCE}")
+            if patience_counter >= PATIENCE:
+                print(f"[early stop] epoch {epoch}")
+                break
 
     finish()
-
 
 if __name__ == "__main__":
     main()

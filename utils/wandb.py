@@ -13,6 +13,13 @@ def init_wandb(config: dict, project: str, experiment_name: str, entity: str | N
         experiment_name: run 이름.
         entity:          WandB 팀/유저명. None이면 기본값 사용.
     """
+    from dotenv import load_dotenv
+    import os
+
+    load_dotenv()  # .env 파일 자동으로 읽음
+
+    # 이제 그냥 os.environ으로 접근 가능
+    wandb_key = os.environ.get('WANDB_API_KEY')
     run = wandb.init(
         project=project,
         name=experiment_name,
