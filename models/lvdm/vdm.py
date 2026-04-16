@@ -39,7 +39,7 @@ class VDM(nn.Module):
         sigma_s = sqrt(sigmoid(gamma_s))
 
         #pred_noise = self.model(z, gamma_t)
-        z_hat = self.model(z, gamma_t, context)
+        z_hat = self.model(x=z, timesteps=gamma_t, context=context)
 
         if clip_samples:
             z_hat =  z_hat.clamp_(0.0, 1.0)
@@ -110,7 +110,7 @@ class VDM(nn.Module):
         x_t, gamma_t = self.sample_q_t_0(x=x, times=times, noise=noise)
 
         # Forward through model
-        x_hat = self.model(x_t, gamma_t, cond)
+        x_hat = self.model(x=x_t, timesteps=gamma_t, context=cond)
         #pdb.set_trace()
         # *** Diffusion loss (bpd)
         gamma_grad = autograd.grad(  # gamma_grad shape: (B, )
@@ -175,23 +175,16 @@ class LearnedLinearSchedule(nn.Module):
 
 if __name__ == "__main__":
     from models.lvdm.uvit import UViT
-    from monai.networks.nets import VQVAE
+    from monai.networks.nets import VQVAE, DiffusionModelUNet
+    from monai.networks.nets.diffusion_model_unet import DiffusionModelUNet
     from types import SimpleNamespace
+    import torch.nn.functional as F
 
     cfg = SimpleNamespace(
         noise_schedule="fixed_linear",
         gamma_min=-13.3,
         gamma_max=5.0,
         antithetic_time_sampling=True,
-    )
-
-    model = UViT(
-        img_size=32,
-        patch_size=2,
-        in_chans=4,
-        embed_dim=512,
-        depth=11,
-        num_heads=4,
     )
 
     ae = VQVAE(
@@ -208,15 +201,51 @@ if __name__ == "__main__":
         commitment_cost=0.4,
     )
 
-    B, C, H, W = 2, 4, 32, 32
+    # cond latent: (B, 1, 32, 32) → (B, 1, 1024)
+    COND_DIM = 1 * 32 * 32  # 1024
+
+    uvit = UViT(
+        img_size=32,
+        patch_size=2,
+        in_chans=1,
+        embed_dim=512,
+        depth=11,
+        num_heads=4,
+        conv=True,
+    )
+
+    unet = DiffusionModelUNet(
+        spatial_dims=2,
+        in_channels=1,
+        out_channels=1,
+        num_res_blocks=2,
+        channels=(128, 256, 512),
+        attention_levels=(True, True, True),
+        norm_num_groups=8,
+        num_head_channels=(16, 32, 64),
+        with_conditioning=True,
+        cross_attention_dim=COND_DIM,  # 1024
+        transformer_num_layers=1,
+    )
+
+    B, C, H, W = 2, 1, 32, 32
     image_shape = (C, H, W)
 
-    vdm = VDM(model=model, cfg=cfg, ae=ae, image_shape=image_shape)
+    x_img    = torch.randn(B, 1, 128, 128)   # CT
+    cond_img = torch.randn(B, 1, 128, 128)   # CBCT
 
-    x    = torch.randn(B, C, H, W)       # latent
-    cond = torch.randn(B, 1, 128, 128) # context (없으면 None)
-    img  = torch.randn(B, 1, 128, 128)    # 원본 이미지 (ae input)
+    with torch.no_grad():
+        x    = ae.encode_stage_2_inputs(x_img)     # (B, 1, 32, 32)
+        cond_latent = ae.encode_stage_2_inputs(cond_img)  # (B, 1, 32, 32)
 
-    loss, metrics = vdm(x, None, img)
-    print(f"loss: {loss.item():.4f}")
-    print(metrics)
+    # UViT 테스트
+    print("=== UViT ===")
+    vdm_uvit = VDM(model=uvit, cfg=cfg, ae=ae, image_shape=image_shape)
+    loss, metrics = vdm_uvit(x, cond_latent, x_img)
+    print(f"loss: {loss.item():.4f}", metrics)
+
+    # UNet 테스트
+    print("=== UNet ===")
+    vdm_unet = VDM(model=unet, cfg=cfg, ae=ae, image_shape=image_shape)
+    loss, metrics = vdm_unet(x, cond_latent.view(B, 1, -1), x_img)
+    print(f"loss: {loss.item():.4f}", metrics)
