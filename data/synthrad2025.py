@@ -15,9 +15,6 @@ from monai.transforms import (
 )
 from torch.utils.data import Dataset, DataLoader
  
- 
-# ── Transform 팩토리 ──────────────────────────────────────────────────────────
- 
 def build_transforms(
     modality: List[str],
     spatial_size: Tuple[int, int] = (128, 128),
