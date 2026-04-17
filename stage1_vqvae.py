@@ -66,7 +66,7 @@ def get_args():
     # 데이터
     p.add_argument("--data_root",      type=str,   default="/home/dministrator/s2025")
     p.add_argument("--anatomy",        nargs="+",  default=["AB", "HN", "TH"])
-    p.add_argument("--spatial_size",   type=int,   default=256)
+    p.add_argument("--spatial_size",   type=int,   default=128)
     p.add_argument("--num_workers",    type=int,   default=4)
     p.add_argument("--val_ratio",      type=float, default=0.2)
     p.add_argument("--modality",       type=str,   default="ct", choices=["cbct", "ct"])
@@ -74,11 +74,11 @@ def get_args():
     p.add_argument("--in_channels",    type=int,   default=9)
     p.add_argument("--embedding_dim",  type=int,   default=1)
     p.add_argument("--num_embeddings", type=int,   default=2048)
-    p.add_argument("--latent_size",    type=int,   default=32, choices=[16, 32, 64])
+    p.add_argument("--compress_ratio",    type=int,   default=4, choices=[2, 4, 8])
     # 학습
     p.add_argument("--device",         type=int,   default=0)
     p.add_argument("--seed",           type=int,   default=42)
-    p.add_argument("--batch_size",     type=int,   default=128)
+    p.add_argument("--batch_size",     type=int,   default=32)
     p.add_argument("--num_epochs",     type=int,   default=1000)
     p.add_argument("--lr_g",           type=float, default=1e-4)
     p.add_argument("--lr_d",           type=float, default=5e-5)
@@ -88,7 +88,7 @@ def get_args():
     # 체크포인트 / WandB
     p.add_argument("--checkpoint_dir", type=str,   default="checkpoints/stage1_vqvae")
     p.add_argument("--resume",         type=str,   default=None)
-    p.add_argument("--wandb_project",  type=str,   default="cbct2ct-stage1")
+    p.add_argument("--wandb_project",  type=str,   default="cbct2ct-stage1-128")
     p.add_argument("--wandb_entity",   type=str,   default=None)
     p.add_argument("--exp_name",       type=str,   default="vqvae_ct_n9_32")
     return p.parse_args()
@@ -148,10 +148,10 @@ def main():
     )
 
     # ── 모델 ─────────────────────────────────────────────────────────────────
-    if args.latent_size == 64:
+    if args.compress_ratio == 2:
         down = ((2, 4, 1, 1), (1, 3, 1, 1), (1, 3, 1, 1), (1, 3, 1, 1))
         up   = ((1, 3, 1, 1, 0), (1, 3, 1, 1, 0), (1, 3, 1, 1, 0), (2, 4, 1, 1, 0))
-    elif args.latent_size == 32:
+    elif args.compress_ratio == 4:
         down = ((2, 4, 1, 1), (2, 4, 1, 1), (1, 3, 1, 1), (1, 3, 1, 1))
         up   = ((1, 3, 1, 1, 0), (1, 3, 1, 1, 0), (2, 4, 1, 1, 0), (2, 4, 1, 1, 0))
     else:  # 16
@@ -206,6 +206,8 @@ def main():
         scheduler_g.load_state_dict(ckpt["scheduler_g_state_dict"])
         scheduler_d.load_state_dict(ckpt["scheduler_d_state_dict"])
         start_epoch = ckpt["epoch"] + 1
+        best_val_loss = ckpt.get("best_val_loss", float("inf"))  # ← 추가
+        
         print(f"[resume] epoch {start_epoch}부터 재개")
 
     # ── 학습 루프 ─────────────────────────────────────────────────────────────

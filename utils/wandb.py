@@ -53,7 +53,7 @@ def log_images(tag: str, images: "torch.Tensor", epoch: int, max_images: int = 4
         imgs = imgs[:, mid : mid + 1]
 
     # [0, 1] 클리핑
-    imgs = imgs.clamp(0, 1)
+    imgs = (imgs.clamp(0, 1) * 255).byte()
 
     wandb.log(
         {tag: [wandb.Image(imgs[i]) for i in range(imgs.shape[0])]},

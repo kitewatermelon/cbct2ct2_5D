@@ -41,6 +41,13 @@ class VDM(nn.Module):
         #pred_noise = self.model(z, gamma_t)
         z_hat = self.model(x=z, timesteps=gamma_t, context=context)
 
+        # 수정
+        from monai.networks.nets import DiffusionModelUNet
+        gamma_t_in = gamma_t.expand(z.shape[0]) if (
+            isinstance(self.model, DiffusionModelUNet) and gamma_t.dim() == 0
+        ) else gamma_t
+        z_hat = self.model(x=z, timesteps=gamma_t_in, context=context)
+
         if clip_samples:
             z_hat =  z_hat.clamp_(0.0, 1.0)
             mean = alpha_s * (z * (1 - c) / alpha_t + c * z_hat)
@@ -111,8 +118,6 @@ class VDM(nn.Module):
 
         # Forward through model
         x_hat = self.model(x=x_t, timesteps=gamma_t, context=cond)
-        #pdb.set_trace()
-        # *** Diffusion loss (bpd)
         gamma_grad = autograd.grad(  # gamma_grad shape: (B, )
             gamma_t,  # (B, )
             times,  # (B, )
@@ -133,7 +138,6 @@ class VDM(nn.Module):
             f = self.ae.encode_stage_2_inputs(img)
         recon_loss = self.recon_loss(img, f) * bpd_factor
 
-        # *** Overall loss in bpd. Shape (B, ).
         loss = diffusion_loss + latent_loss + recon_loss
 
         with torch.no_grad():
