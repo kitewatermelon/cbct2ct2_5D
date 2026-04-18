@@ -29,7 +29,8 @@ COMMON="--num_steps ${NUM_STEPS} \
         --fid_warmup_steps ${FID_WARMUP_STEPS} \
         --qual_save_every ${QUAL_SAVE_EVERY} \
         --num_eval_samples ${NUM_EVAL_SAMPLES} \
-        --data_root ${DATA}"
+        --data_root ${DATA}" \
+        --embedding_dim 1 \
 
 # ===========================================================================
 # Ablation 1-A: n1, n3, n5 @ cpr4  (GPU 4,5,6 동시)
@@ -40,21 +41,21 @@ PYTHONPATH=. python stage2_vdm.py --batch_size 8 \
   --backbone uvit --in_channels 1 --compress_ratio 4 \
   --ct_ckpt   ${CKPT}/vqvae_ct_n1_cpr4_img128/best.pt \
   --cbct_ckpt ${CKPT}/vqvae_cbct_n1_cpr4_img128/best.pt \
-  --exp_name vdm_uvit_n1_cpr4_img128 --device 4 \
+  --exp_name 1_vdm_uvit_n1_cpr4_img128 --device 4 \
   ${COMMON} > logs/stage2_uvit_n1_cpr4.log 2>&1 &
 
 PYTHONPATH=. python stage2_vdm.py --batch_size 8 \
   --backbone uvit --in_channels 3 --compress_ratio 4 \
   --ct_ckpt   ${CKPT}/vqvae_ct_n3_cpr4_img128/best.pt \
   --cbct_ckpt ${CKPT}/vqvae_cbct_n3_cpr4_img128/best.pt \
-  --exp_name vdm_uvit_n3_cpr4_img128 --device 5 \
+  --exp_name 1_vdm_uvit_n3_cpr4_img128 --device 5 \
   ${COMMON} > logs/stage2_uvit_n3_cpr4.log 2>&1 &
 
 PYTHONPATH=. python stage2_vdm.py --batch_size 8 \
   --backbone uvit --in_channels 5 --compress_ratio 4 \
   --ct_ckpt   ${CKPT}/vqvae_ct_n5_cpr4_img128/best.pt \
   --cbct_ckpt ${CKPT}/vqvae_cbct_n5_cpr4_img128/best.pt \
-  --exp_name vdm_uvit_n5_cpr4_img128 --device 6 \
+  --exp_name 1_vdm_uvit_n5_cpr4_img128 --device 6 \
   ${COMMON} > logs/stage2_uvit_n5_cpr4.log 2>&1 &
 
 wait
@@ -68,14 +69,14 @@ PYTHONPATH=. python stage2_vdm.py --batch_size 8 \
   --backbone uvit --in_channels 7 --compress_ratio 4 \
   --ct_ckpt   ${CKPT}/vqvae_ct_n7_cpr4_img128/best.pt \
   --cbct_ckpt ${CKPT}/vqvae_cbct_n7_cpr4_img128/best.pt \
-  --exp_name vdm_uvit_n7_cpr4_img128 --device 4 \
+  --exp_name 1_vdm_uvit_n7_cpr4_img128 --device 4 \
   ${COMMON} > logs/stage2_uvit_n7_cpr4.log 2>&1 &
 
 PYTHONPATH=. python stage2_vdm.py --batch_size 8 \
   --backbone uvit --in_channels 9 --compress_ratio 4 \
   --ct_ckpt   ${CKPT}/vqvae_ct_n9_cpr4_img128/best.pt \
   --cbct_ckpt ${CKPT}/vqvae_cbct_n9_cpr4_img128/best.pt \
-  --exp_name vdm_uvit_n9_cpr4_img128 --device 5 \
+  --exp_name 1_vdm_uvit_n9_cpr4_img128 --device 5 \
   ${COMMON} > logs/stage2_uvit_n9_cpr4.log 2>&1 &
 
 wait
@@ -91,14 +92,14 @@ PYTHONPATH=. python stage2_vdm.py --batch_size 8 \
   --backbone uvit --in_channels 5 --compress_ratio 8 \
   --ct_ckpt   ${CKPT}/vqvae_ct_n5_cpr8_img128/best.pt \
   --cbct_ckpt ${CKPT}/vqvae_cbct_n5_cpr8_img128/best.pt \
-  --exp_name vdm_uvit_n5_cpr8_img128 --device 4 \
+  --exp_name 1_vdm_uvit_n5_cpr8_img128 --device 4 \
   ${COMMON} > logs/stage2_uvit_n5_cpr8.log 2>&1 &
 
 PYTHONPATH=. python stage2_vdm.py --batch_size 8 \
   --backbone uvit --in_channels 5 --compress_ratio 2 \
   --ct_ckpt   ${CKPT}/vqvae_ct_n5_cpr2_img128/best.pt \
   --cbct_ckpt ${CKPT}/vqvae_cbct_n5_cpr2_img128/best.pt \
-  --exp_name vdm_uvit_n5_cpr2_img128 --device 5 \
+  --exp_name 1_vdm_uvit_n5_cpr2_img128 --device 5 \
   ${COMMON} > logs/stage2_uvit_n5_cpr2.log 2>&1 &
 
 wait

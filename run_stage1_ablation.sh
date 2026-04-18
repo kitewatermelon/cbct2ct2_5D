@@ -9,7 +9,7 @@ CKPT_DIR=checkpoints/stage1_vqvae
 
 run() {
     local MOD=$1 N=$2 CPR=$3 GPU=$4
-    local NAME="vqvae_${MOD}_n${N}_cpr${CPR}_img128"
+    local NAME="1_vqvae_${MOD}_n${N}_cpr${CPR}_img128"
     local LATEST="${CKPT_DIR}/${NAME}/best.pt"
     local RESUME_ARG=""
 
@@ -20,7 +20,7 @@ run() {
 
     PYTHONPATH=. python stage1_vqvae.py \
         --modality $MOD --in_channels $N --compress_ratio $CPR \
-        --exp_name $NAME --data_root $DATA --device $GPU --embedding_dim 4 \
+        --exp_name $NAME --data_root $DATA --device $GPU --embedding_dim 1 \
         $RESUME_ARG \
         > logs/${NAME}.log 2>&1 &
 }

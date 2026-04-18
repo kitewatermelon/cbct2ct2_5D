@@ -88,7 +88,7 @@ def get_args():
     # 체크포인트 / WandB
     p.add_argument("--checkpoint_dir", type=str,   default="checkpoints/stage1_vqvae")
     p.add_argument("--resume",         type=str,   default=None)
-    p.add_argument("--wandb_project",  type=str,   default="cbct2ct-stage1-128")
+    p.add_argument("--wandb_project",  type=str,   default="cbct2ct-stage1-128-1")
     p.add_argument("--wandb_entity",   type=str,   default=None)
     p.add_argument("--exp_name",       type=str,   default="vqvae_ct_n9_32")
     return p.parse_args()
