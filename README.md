@@ -20,7 +20,7 @@ This project implements an end-to-end pipeline to synthesize CT images from CBCT
 ## 📦 Dataset
 
 - **SynthRAD2025**: 955 subjects across 3 anatomical regions
-- Data root: `/data/prof2/mai/s2025/dataset`
+- Preprocessing: Custom data loader with configurable transforms
 - Train/Val split: 80/20
 
 ## 🏗️ Project Structure
@@ -35,7 +35,7 @@ cbct2ct2_5D/
 ├── run_stage1_ablation.sh   # Ablation study for Stage 1
 ├── run_stage2_ablation.sh   # Ablation study for Stage 2
 ├── configs/                 # YAML configuration files
-├── data/                    # Dataset loaders (SynthRad2025)
+├── data/                    # Dataset loaders
 ├── models/                  # Model definitions (VDM, UViT, etc.)
 ├── optim/                   # Optimization utilities
 └── utils/                   # Logging and helpers
@@ -120,12 +120,11 @@ All experiments logged to WandB:
 - FID score tracking
 - Hyperparameter sweeps
 
-## 🛠️ Development Environment
+## 🛠️ Development
 
-- **GPU**: RTX A6000 (CUDA 12.6)
-- **Server**: gpu.pknu.ac.kr (PKNU GPU Cluster)
 - **Python**: ≥3.10
 - **Key Dependencies**: PyTorch 2.6+, MONAI 1.5+, WandB
+- **GPU Support**: CUDA compatible devices
 
 ## 📝 Key Files
 
@@ -138,22 +137,9 @@ All experiments logged to WandB:
 | `eval.py` | Standalone evaluation utilities |
 | `data/synthrad2025.py` | Dataset loading and preprocessing |
 
-## 🎓 Citation
-
-If you use this code in your research:
-
-```bibtex
-@article{cbct2ct_2025,
-  title={2.5D Context Encoding with Latent-Space Variational Diffusion for CBCT-to-CT Synthesis},
-  author={Park, YeonSu},
-  journal={MDPI},
-  year={2025}
-}
-```
-
 ## 📋 Notes
 
-- FID metric disabled during warmup phase (first 50K steps) to avoid NaN issues
+- FID metric disabled during warmup phase to avoid NaN issues
 - Uses 2.5D context encoding to balance computational cost and receptive field
 - Both stages can be trained independently after Stage 1 checkpoint is saved
 - Supports mixed precision training (AMP) for memory efficiency
