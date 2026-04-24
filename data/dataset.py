@@ -128,19 +128,22 @@ class SynthRad2025(Dataset):
         hu_max: float = 3071.0,
         apply_mask: bool = True,
         slice_margin: int = 10,
+        cache_subjects: int = 32,
     ) -> None:
         """
         Args:
-            slice_margin: 볼륨 앞뒤로 제외할 슬라이스 수. 기본 10.
-                          검은 슬라이스(body 없는 경계부) 학습 제외용.
+            slice_margin:    볼륨 앞뒤로 제외할 슬라이스 수. 기본 10.
+            cache_subjects:  worker당 메모리에 보관할 최대 볼륨 수. 0 = 캐시 비활성화.
         """
-        self.modality     = modality
-        self.n_slices     = n_slices
-        self.transform    = transform
-        self.hu_min       = hu_min
-        self.hu_max       = hu_max
-        self.apply_mask   = apply_mask
-        self.slice_margin = slice_margin
+        self.modality       = modality
+        self.n_slices       = n_slices
+        self.transform      = transform
+        self.hu_min         = hu_min
+        self.hu_max         = hu_max
+        self.apply_mask     = apply_mask
+        self.slice_margin   = slice_margin
+        self._cache_max     = cache_subjects
+        self._volume_cache: Dict[int, Dict[str, torch.Tensor]] = {}
 
         subject_dirs = self._resolve_subject_dirs(root, anatomy)
         self.subject_dirs, skipped = self._validate(subject_dirs)
@@ -232,7 +235,13 @@ class SynthRad2025(Dataset):
         return vol
 
     def _get_volume(self, subj_idx: int) -> Dict[str, torch.Tensor]:
-        return self._load_volume(self.subject_dirs[subj_idx])
+        if self._cache_max == 0:
+            return self._load_volume(self.subject_dirs[subj_idx])
+        if subj_idx not in self._volume_cache:
+            if len(self._volume_cache) >= self._cache_max:
+                self._volume_cache.pop(next(iter(self._volume_cache)))
+            self._volume_cache[subj_idx] = self._load_volume(self.subject_dirs[subj_idx])
+        return self._volume_cache[subj_idx]
 
     def _extract_window(
         self,

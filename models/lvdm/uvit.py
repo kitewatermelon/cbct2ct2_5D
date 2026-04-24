@@ -176,7 +176,7 @@ class Attention(nn.Module):
         B, L, C = x.shape
 
         qkv = self.qkv(x)
-        qkv = einops.rearrange(qkv, 'B L (K H D) -> K B H L D', K=3, H=self.num_heads).float()
+        qkv = einops.rearrange(qkv, 'B L (K H D) -> K B H L D', K=3, H=self.num_heads)
         q, k, v = qkv[0], qkv[1], qkv[2]  # B H L D
         x = torch.nn.functional.scaled_dot_product_attention(q, k, v)
         x = einops.rearrange(x, 'B H L D -> B L (H D)')
@@ -206,9 +206,9 @@ class CrossAttention(nn.Module):
 
         q = self.q_proj(x)
         kv = self.kv_proj(context)
-        
-        q = einops.rearrange(q, 'B L (H D) -> B H L D', H=self.num_heads).float()
-        kv = einops.rearrange(kv, 'B L (K H D) -> K B H L D', K=2, H=self.num_heads).float()
+
+        q = einops.rearrange(q, 'B L (H D) -> B H L D', H=self.num_heads)
+        kv = einops.rearrange(kv, 'B L (K H D) -> K B H L D', K=2, H=self.num_heads)
         k, v = kv[0], kv[1]  # B H L D
         x = torch.nn.functional.scaled_dot_product_attention(q, k, v)
         x = einops.rearrange(x, 'B H L D -> B L (H D)')

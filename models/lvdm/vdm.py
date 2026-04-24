@@ -38,10 +38,6 @@ class VDM(nn.Module):
         sigma_t = sqrt(sigmoid(gamma_t))
         sigma_s = sqrt(sigmoid(gamma_s))
 
-        #pred_noise = self.model(z, gamma_t)
-        z_hat = self.model(x=z, timesteps=gamma_t, context=context)
-
-        # 수정
         from monai.networks.nets import DiffusionModelUNet
         gamma_t_in = gamma_t.expand(z.shape[0]) if (
             isinstance(self.model, DiffusionModelUNet) and gamma_t.dim() == 0
@@ -68,8 +64,7 @@ class VDM(nn.Module):
 
     def sample_q_t_0(self, x, times, noise=None):
         """Samples from the distributions q(x_t | x_0) at the given time steps."""
-        with torch.enable_grad():  # Need gradient to compute loss even when evaluating
-            gamma_t = self.gamma(times)
+        gamma_t = self.gamma(times)
         gamma_t_padded = unsqueeze_right(gamma_t, x.ndim - gamma_t.ndim)
         mean = x * sqrt(sigmoid(-gamma_t_padded))  # x * alpha
         scale = sqrt(sigmoid(gamma_t_padded))
@@ -111,20 +106,14 @@ class VDM(nn.Module):
         bpd_factor = 1 / (np.prod(x.shape[1:]) * np.log(2))
 
         # Sample from q(x_t | x_0) with random t.
-        times = self.sample_times(x.shape[0]).requires_grad_(True)
+        times = self.sample_times(x.shape[0])
         if noise is None:
             noise = torch.randn_like(x)
         x_t, gamma_t = self.sample_q_t_0(x=x, times=times, noise=noise)
 
         # Forward through model
         x_hat = self.model(x=x_t, timesteps=gamma_t, context=cond)
-        gamma_grad = autograd.grad(  # gamma_grad shape: (B, )
-            gamma_t,  # (B, )
-            times,  # (B, )
-            grad_outputs=torch.ones_like(gamma_t),
-            create_graph=True,
-            retain_graph=True,
-        )[0]
+        gamma_grad = self.gamma.gradient(times)
         snr_t = torch.exp(-gamma_t)
         pred_loss = snr_t * ((x_hat - x) ** 2).sum((1, 2, 3))  # (B, )
         diffusion_loss = 0.5 * pred_loss * gamma_grad * bpd_factor
@@ -134,9 +123,7 @@ class VDM(nn.Module):
         mean_sq = (1 - sigma_1_sq) * x**2  # (alpha_1 * x)**2
         latent_loss = kl_std_normal(mean_sq, sigma_1_sq).sum((1, 2, 3)) * bpd_factor
 
-        with torch.no_grad():
-            f = self.ae.encode_stage_2_inputs(img)
-        recon_loss = self.recon_loss(img, f) * bpd_factor
+        recon_loss = self.recon_loss(img, x) * bpd_factor
 
         loss = diffusion_loss + latent_loss + recon_loss
 
@@ -166,6 +153,9 @@ class FixedLinearSchedule(nn.Module):
     def forward(self, t):
         return self.gamma_min + (self.gamma_max - self.gamma_min) * t
 
+    def gradient(self, t):
+        return torch.full_like(t, self.gamma_max - self.gamma_min)
+
 
 class LearnedLinearSchedule(nn.Module):
     def __init__(self, gamma_min, gamma_max):
@@ -175,6 +165,9 @@ class LearnedLinearSchedule(nn.Module):
 
     def forward(self, t):
         return self.b + self.w.abs() * t
+
+    def gradient(self, t):
+        return self.w.abs().expand_as(t)
 
 
 if __name__ == "__main__":
