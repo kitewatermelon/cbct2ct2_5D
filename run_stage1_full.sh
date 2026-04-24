@@ -33,7 +33,7 @@ run() {
         --batch_size     $BATCH \
         --num_workers    $WORKERS \
         --num_epochs     100 \
-        --patience       20 \
+        --patience       10 \
         --lr_g           1e-4 \
         --lr_d           5e-5 \
         --wandb_project  cbct2ct-stage1-full \
@@ -43,7 +43,7 @@ run() {
     echo "[launched] $NAME → GPU $GPU (batch=$BATCH, workers=$WORKERS) | log: logs/${NAME}.log"
 }
 
-for MOD in ct cbct; do
+for MOD in cbct; do
     echo "=== [$MOD] Ablation ==="
 
     # n ablation: cpr4 고정, n1,n3,n5,n7,n9
@@ -53,15 +53,10 @@ for MOD in ct cbct; do
     run $MOD 5 4 6
     wait
 
-    echo "--- [$MOD] n ablation @ cpr4: n7,n9 ---"
+    echo "--- [$MOD] n ablation @ cpr4: n7,n9 / n5: cpr2---"
     run $MOD 7 4 4
     run $MOD 9 4 5
-    wait
-
-    # cpr ablation: n5 고정, cpr2,cpr8 (cpr4는 위에서 완료)
-    echo "--- [$MOD] cpr ablation @ n5: cpr2,cpr8 ---"
-    run $MOD 5 2 4
-    run $MOD 5 8 5
+    run $MOD 5 2 6
     wait
 
     echo "=== [$MOD] done ==="

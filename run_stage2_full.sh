@@ -69,12 +69,7 @@ wait
 echo "--- n ablation @ cpr4: n7,n9 ---"
 run 7 4 4
 run 9 4 5
-wait
-
-# cpr ablation: n5 고정, cpr2,cpr8 (cpr4는 위에서 완료)
-echo "--- cpr ablation @ n5: cpr2,cpr8 ---"
-run 5 2 4
-run 5 8 5
+run 5 2 6
 wait
 
 echo "=== All stage2 full ablations done ==="
