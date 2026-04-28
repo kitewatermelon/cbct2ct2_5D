@@ -15,7 +15,7 @@ WORKERS=8
 
 COMMON="--embedding_dim       1 \
         --num_embeddings      2048 \
-        --backbone            uvit \
+        --backbone            unet \
         --preprocessed_root   $PREPROCESSED \
         --num_steps           100000 \
         --batch_size        $BATCH \
@@ -61,4 +61,4 @@ echo "=== Stage2 Full Ablation ==="
 
 # n ablation: cpr4 고정, n1,n3,n5,n7,n9
 echo "--- n ablation @ cpr4: n1,n3,n5 ---"
-run 1 4 0
+run 5 4 0

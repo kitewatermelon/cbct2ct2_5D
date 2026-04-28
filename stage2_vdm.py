@@ -1,16 +1,26 @@
-"""stage2_full.py — VDM 학습 (Stage 2).
+"""stage2_vdm.py — VDM 학습 (Stage 2).
 
 - Stage 1 VQVAE (CT, CBCT) 고정
 - CT latent → VDM denoising (conditioned on CBCT latent)
 - backbone: UViT or DiffusionModelUNet
 - 로깅: WandB
 - 평가: SSIM, PSNR, MSE, FID (step 기반)
-- 데이터: data/preprocess.py 로 미리 저장된 슬라이스 파일 사용
+
+[최적화 변경사항]
+- sample_steps_eval 기본값: 100 → 20
+- eval_every 기본값: 2_000 → 5_000
+- num_eval_samples 기본값: 8 → 4
+- FID 계산: step > fid_warmup_steps 이후에만 실행 (기본 50_000)
+- qualitative grid 저장: eval_every * 5 마다만 저장
+- Inception 모델: FID 비활성 구간엔 forward 스킵
+- DataLoader persistent_workers=True 추가
+- prefetch_factor=2 추가
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import pathlib
 from types import SimpleNamespace
 
@@ -19,7 +29,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import wandb
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 from torchvision.models import inception_v3
 from torchvision.utils import make_grid
 from tqdm.auto import tqdm
@@ -29,8 +39,7 @@ from monai.metrics.fid import FIDMetric
 from monai.networks.nets import VQVAE, DiffusionModelUNet
 from monai.utils import set_determinism
 
-from data.preprocessed_dataset import PreprocessedDataset, build_preprocessed_transforms
-
+from data.synthrad2025 import SynthRad2025, build_transforms
 from models.lvdm.uvit import UViT
 from models.lvdm.vdm import VDM
 from models.lvdm.utils import get_lr
@@ -43,14 +52,11 @@ from utils.wandb import finish, init_wandb, log_train, log_images
 
 def get_args():
     p = argparse.ArgumentParser(description="Stage2 VDM 학습")
-
-    # ── 데이터 ───────────────────────────────────────────────────────────
-    p.add_argument("--preprocessed_root", type=str,
-                   default="../s2025/dataset/preprocessed",
-                   help="data/preprocess.py 의 --output_root 경로")
+    p.add_argument("--data_root",        type=str,   default="/home/dministrator/s2025")
+    p.add_argument("--anatomy",          nargs="+",  default=["AB", "HN", "TH"])
+    p.add_argument("--spatial_size",     type=int,   default=128)
     p.add_argument("--num_workers",      type=int,   default=4)
-
-    # ── 모델 ────────────────────────────────────────────────────────────
+    p.add_argument("--val_ratio",        type=float, default=0.2)
     p.add_argument("--in_channels",      type=int,   default=9)
     p.add_argument("--ct_ckpt",          type=str,   required=True)
     p.add_argument("--cbct_ckpt",        type=str,   required=True)
@@ -64,42 +70,41 @@ def get_args():
     p.add_argument("--uvit_patch_size",  type=int,   default=2)
     p.add_argument("--unet_channels",    nargs="+",  type=int, default=[128, 256, 384])
     p.add_argument("--unet_res_blocks",  type=int,   default=1)
-
-    # ── VDM ─────────────────────────────────────────────────────────────
     p.add_argument("--noise_schedule",   type=str,   default="fixed_linear")
     p.add_argument("--gamma_min",        type=float, default=-5.0)
     p.add_argument("--gamma_max",        type=float, default=5.0)
     p.add_argument("--antithetic",       action="store_true", default=True)
     p.add_argument("--n_sample_steps",   type=int,   default=200)
-
-    # ── 학습 ────────────────────────────────────────────────────────────
     p.add_argument("--device",           type=int,   default=0)
     p.add_argument("--seed",             type=int,   default=42)
     p.add_argument("--batch_size",       type=int,   default=16)
-    p.add_argument("--num_steps",        type=int,   default=100_000)
-    p.add_argument("--lr",               type=float, default=2e-4)
-    p.add_argument("--weight_decay",     type=float, default=0.03)
-    p.add_argument("--amp",              action="store_true", default=True)
-    p.add_argument("--warmup_steps",     type=int,   default=2_500)
+    p.add_argument("--num_steps",        type=int,   default=50_000)
 
-    # ── Eval ─────────────────────────────────────────────────────────────
-    p.add_argument("--eval_every",       type=int,   default=5_000)
+    # ── [최적화] eval 관련 기본값 조정 ──────────────────────────────────
+    p.add_argument("--eval_every",       type=int,   default=5_000,  # 2_000 → 5_000
+                   help="몇 step마다 eval 실행할지")
     p.add_argument("--log_every",        type=int,   default=100)
-    p.add_argument("--num_eval_samples", type=int,   default=4,
-                   help="eval 시 샘플링할 최대 샘플 수")
-    p.add_argument("--sample_steps_eval",type=int,   default=20,
-                   help="eval 샘플링 DDPM 스텝 수")
+    p.add_argument("--lr",               type=float, default=2e-4)
+    p.add_argument("--weight_decay",     type=float, default=1e-4)
+    p.add_argument("--amp",              action="store_true", default=True)
+    p.add_argument("--warmup_steps",     type=int,   default=5_000)
+    p.add_argument("--num_eval_samples", type=int,   default=4,      # 8 → 4
+                   help="eval 시 샘플링할 샘플 수")
+    p.add_argument("--sample_steps_eval",type=int,   default=20,     # 100 → 20
+                   help="eval 샘플링 DDPM 스텝 수 (학습 중엔 20으로 충분)")
     p.add_argument("--fid_warmup_steps", type=int,   default=10_000,
-                   help="이 step 이후부터 FID 계산 시작")
+                   help="이 step 이후부터 FID 계산 시작 (초반엔 의미 없음)")
     p.add_argument("--qual_save_every",  type=int,   default=5,
-                   help="eval 몇 회마다 qualitative grid 저장할지")
+                   help="eval 몇 회마다 qualitative grid 저장할지 (1=매번)")
+    # ────────────────────────────────────────────────────────────────────
 
-    # ── 체크포인트 & WandB ───────────────────────────────────────────────
-    p.add_argument("--checkpoint_dir",   type=str,   default="checkpoints/stage2_vdm")
+    p.add_argument("--latent_scale_override", type=float, default=None,
+                   help="latent scale factor override (default: auto from first batch)")
+    p.add_argument("--checkpoint_dir",   type=str,   default="checkpoints_임베딩1/stage2_vdm")
     p.add_argument("--resume",           type=str,   default=None)
     p.add_argument("--wandb_project",    type=str,   default="cbct2ct-stage2-128-1")
     p.add_argument("--wandb_entity",     type=str,   default=None)
-    p.add_argument("--exp_name",         type=str,   default="vdm_uvit_n9_cpr4")
+    p.add_argument("--exp_name",         type=str,   default="vdm_uvit_n9_32")
     return p.parse_args()
 
 
@@ -130,46 +135,19 @@ def infinite_loader(loader: DataLoader):
             yield batch
 
 
-def _remap_compiled_state_dict(sd: dict, model: torch.nn.Module) -> dict:
-    """torch.compile() 전후 저장된 체크포인트의 _orig_mod 키 불일치를 자동 수정."""
-    model_keys = set(model.state_dict().keys())
-    if model_keys == set(sd.keys()):
-        return sd
-
-    # ckpt: model.xxx  →  현재: model._orig_mod.xxx (compile 후 로드)
-    remapped = {
-        ("model._orig_mod." + k[len("model."):] if k.startswith("model.") and not k.startswith("model._orig_mod.") else k): v
-        for k, v in sd.items()
-    }
-    if model_keys == set(remapped.keys()):
-        print("[resume] _orig_mod 키 리매핑 적용 (compile 전 ckpt → compile 후 모델)")
-        return remapped
-
-    # ckpt: model._orig_mod.xxx  →  현재: model.xxx (compile 없이 로드)
-    remapped = {
-        (k.replace("model._orig_mod.", "model.", 1) if k.startswith("model._orig_mod.") else k): v
-        for k, v in sd.items()
-    }
-    if model_keys == set(remapped.keys()):
-        print("[resume] _orig_mod 키 제거 적용 (compile 후 ckpt → compile 전 모델)")
-        return remapped
-
-    return sd  # 매핑 실패 시 원본 반환 (load_state_dict에서 에러 출력)
-
-
 def _prepare_cond(z_cond: torch.Tensor, backbone: str) -> torch.Tensor:
-    """backbone 종류에 따라 conditioning tensor 형태 조정."""
     if backbone == "unet":
         B = z_cond.shape[0]
         return z_cond.view(B, 1, -1)
     return z_cond
 
 
-def _lr_lambda(warmup_steps: int):
+def _lr_lambda(warmup_steps: int, total_steps: int, min_lr_ratio: float = 0.1):
     def fn(step):
         if step < warmup_steps:
             return step / max(1, warmup_steps)
-        return 1.0
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return max(min_lr_ratio, 0.5 * (1.0 + math.cos(math.pi * progress)))
     return fn
 
 
@@ -213,12 +191,12 @@ def sample_conditional(vdm, cond, n_steps, device):
     z = torch.randn((cond.shape[0], *vdm.image_shape), device=device)
     steps = torch.linspace(1.0, 0.0, n_steps + 1, device=device)
     for i in range(n_steps):
-        z = vdm.sample_p_s_t(z, steps[i], steps[i + 1], clip_samples=True, context=cond)
+        z = vdm.sample_p_s_t(z, steps[i], steps[i + 1], context=cond)
     return z
 
 
 # ---------------------------------------------------------------------------
-# Inception (FID)
+# Inception (FID) — FID 활성화된 경우에만 사용
 # ---------------------------------------------------------------------------
 
 def build_inception(device):
@@ -254,30 +232,32 @@ def save_ckpt(path, step, vdm, optimizer, scheduler, best_val_loss):
 
 @torch.no_grad()
 def evaluate(vdm, ct_ae, cbct_ae, val_loader, args, device, step,
-             ckpt_dir, inception, eval_count: int):
+             ckpt_dir, inception, eval_count: int, scale_factor: float = 1.0):
     vdm.eval()
 
+    # [최적화] FID는 fid_warmup_steps 이후에만 계산
     compute_fid = (step >= args.fid_warmup_steps)
-    save_qual   = (eval_count % args.qual_save_every == 0)
 
     psnr_m = PSNRMetric(max_val=1.0)
     ssim_m = SSIMMetric(data_range=1.0, spatial_dims=2)
     fid_m  = FIDMetric()
-    loss_m = Mean(device=device)
 
+    loss_m  = Mean(device=device)
     mse_sum, n_seen = 0.0, 0
     feats_real, feats_fake = [], []
+
+    # [최적화] qual_save_every 주기로만 grid 저장
+    save_qual = (eval_count % args.qual_save_every == 0)
     qual_imgs, samples_done = [], 0
 
-    mid = args.in_channels // 2   # 중간 슬라이스 인덱스
+    mid = args.in_channels // 2
 
     for batch in tqdm(val_loader, desc=f"[Eval {step}]", leave=False):
-        ct_img   = batch["ct"].to(device)    # (B, n_slices, H, W)
-        cbct_img = batch["cbct"].to(device)  # (B, n_slices, H, W)
+        ct_img   = batch["ct"].to(device)
+        cbct_img = batch["cbct"].to(device)
 
-        # VQVAE encode
-        z      = ct_ae.encode_stage_2_inputs(ct_img)
-        z_cond = cbct_ae.encode_stage_2_inputs(cbct_img)
+        z      = ct_ae.encode_stage_2_inputs(ct_img)   * scale_factor
+        z_cond = cbct_ae.encode_stage_2_inputs(cbct_img) * scale_factor
         cond   = _prepare_cond(z_cond, args.backbone)
 
         # val loss (샘플링 없이 — 빠름)
@@ -285,33 +265,38 @@ def evaluate(vdm, ct_ae, cbct_ae, val_loader, args, device, step,
             _, metrics = vdm(z, cond, ct_img)
         loss_m.update(metrics["bpd"])
 
-        # 샘플링은 num_eval_samples만큼만
+        # [최적화] 샘플링은 num_eval_samples만큼만, 나머지 배치는 loss만 계산
         if samples_done < args.num_eval_samples:
             with torch.amp.autocast("cuda", enabled=args.amp, dtype=torch.bfloat16):
+                # [최적화] sample_steps_eval=20 (기본값)
                 sampled_z = sample_conditional(vdm, cond, args.sample_steps_eval, device)
-            ct_gen = ct_ae.decode_stage_2_outputs(sampled_z)   # (B, 1, H, W)
-
-            # GT: 중간 슬라이스 1장 (diffusion output과 채널 맞춤)
-            ct_gt = ct_img[:, mid:mid+1]   # (B, 1, H, W)
+            ct_gen = ct_ae.decode_stage_2_outputs(sampled_z / scale_factor)
+            # [수정] gt는 원본 ct_img 직접 사용
+            # (encode→decode 하면 VQ-VAE 압축 오차가 메트릭에 섞여 diffusion 성능이 실제보다 좋게 측정됨)
+            # ct_img는 (B, in_channels, H, W) → 중간 슬라이스만 추출해서 ct_gen(1ch)과 채널 맞춤
+            ct_gt = ct_img[:, mid:mid+1]  # (B, 1, H, W)
 
             psnr_m(ct_gen, ct_gt)
             ssim_m(ct_gen, ct_gt)
             mse_sum += F.mse_loss(ct_gen, ct_gt, reduction="sum").item()
             n_seen  += ct_gt.numel()
 
+            # [최적화] FID: warmup 이후에만 inception forward
             if compute_fid:
                 feats_fake.append(inception_feats(ct_gen, inception))
                 feats_real.append(inception_feats(ct_gt,  inception))
 
+            # [최적화] qualitative: save_qual일 때만 수집
             if save_qual:
                 for i in range(ct_gen.shape[0]):
                     if len(qual_imgs) >= 4 * args.num_eval_samples:
                         break
                     diff = (ct_gen[i] - ct_gt[i]).abs()
+                    # ct_gt는 multi-channel (in_channels)이므로 중간 슬라이스만 시각화
                     for t in (cbct_img[i, mid:mid+1], ct_gen[i], ct_gt[i], diff):
                         qual_imgs.append(t.detach().cpu())
 
-            # 첫 번째 배치만 WandB 이미지 로그
+            # 첫 번째 샘플링 배치만 WandB 이미지 로그
             if samples_done == 0:
                 n = min(4, ct_gen.shape[0])
                 log_images("eval/cbct_input", cbct_img[:n, mid:mid+1].float(), step)
@@ -320,7 +305,7 @@ def evaluate(vdm, ct_ae, cbct_ae, val_loader, args, device, step,
 
             samples_done += ct_gen.shape[0]
 
-    # qualitative grid 저장
+    # [최적화] qualitative grid 저장 (주기적으로만)
     if save_qual and qual_imgs:
         grid = make_grid(torch.stack(qual_imgs), nrow=4, normalize=True, value_range=(-1, 1))
         plt.figure(figsize=(10, 3 * args.num_eval_samples))
@@ -335,6 +320,7 @@ def evaluate(vdm, ct_ae, cbct_ae, val_loader, args, device, step,
     ssim_val = ssim_m.aggregate().item()
     mse_val  = mse_sum / max(n_seen, 1)
 
+    # [최적화] FID: warmup 이후에만
     if compute_fid and feats_fake:
         fid_val = fid_m(torch.vstack(feats_fake), torch.vstack(feats_real)).item()
     else:
@@ -361,11 +347,6 @@ def evaluate(vdm, ct_ae, cbct_ae, val_loader, args, device, step,
     vdm.train()
     return results
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
 def main():
     args = get_args()
 
@@ -382,26 +363,24 @@ def main():
         print(f"GPU: {torch.cuda.get_device_name(args.device)}")
 
     # ── 데이터 ───────────────────────────────────────────────────────────
-    train_ds = PreprocessedDataset(
-        preprocessed_root = args.preprocessed_root,
-        split    = "train",
-        n_slices = args.in_channels,
-        modality = ["cbct", "ct"],
-        transform = build_preprocessed_transforms(["cbct", "ct"], augment=True),
+    ss = (args.spatial_size, args.spatial_size)
+    full_ds = SynthRad2025(
+        root=f"{args.data_root}/dataset/train/n{args.in_channels}",
+        modality=["cbct", "ct"], anatomy=args.anatomy,
+        transform=build_transforms(["cbct", "ct"], spatial_size=ss, augment=True),
     )
-    val_ds = PreprocessedDataset(
-        preprocessed_root = args.preprocessed_root,
-        split    = "val",
-        n_slices = args.in_channels,
-        modality = ["cbct", "ct"],
-        transform = build_preprocessed_transforms(["cbct", "ct"], augment=False),
+    n_val   = int(len(full_ds) * args.val_ratio)
+    n_train = len(full_ds) - n_val
+    train_ds, val_ds = random_split(
+        full_ds, [n_train, n_val],
+        generator=torch.Generator().manual_seed(args.seed),
     )
-    print(f"train: {len(train_ds):,}슬라이스 ({len(train_ds.subject_dirs)}케이스) | "
-          f"val: {len(val_ds):,}슬라이스 ({len(val_ds.subject_dirs)}케이스)")
+    print(f"train: {n_train}, val: {n_val}")
 
+    # [최적화] persistent_workers + prefetch_factor 추가
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size,
-        shuffle=True,  num_workers=args.num_workers,
+        shuffle=True, num_workers=args.num_workers,
         drop_last=True, pin_memory=True,
         persistent_workers=(args.num_workers > 0),
         prefetch_factor=2 if args.num_workers > 0 else None,
@@ -415,15 +394,6 @@ def main():
     )
     train_iter = infinite_loader(train_loader)
 
-    # 전처리 메타에서 spatial_size 읽기
-    _meta_candidates = sorted(pathlib.Path(args.preprocessed_root).glob("split_seed*.json"))
-    if _meta_candidates:
-        _meta = json.loads(_meta_candidates[0].read_text()).get("meta", {})
-        spatial_size = int(_meta.get("spatial_size", 128))
-    else:
-        spatial_size = 128
-    print(f"spatial_size: {spatial_size}")
-
     # ── VQVAE ────────────────────────────────────────────────────────────
     vqvae_kwargs = dict(out_channels=1, compress_ratio=args.compress_ratio,
                         embedding_dim=args.embedding_dim, num_embeddings=args.num_embeddings)
@@ -431,72 +401,66 @@ def main():
     cbct_ae = load_frozen_vqvae(args.cbct_ckpt, device, in_channels=args.in_channels, **vqvae_kwargs)
 
     with torch.no_grad():
-        dummy        = torch.zeros(1, args.in_channels, spatial_size, spatial_size, device=device)
+        dummy        = torch.zeros(1, args.in_channels, args.spatial_size, args.spatial_size, device=device)
         latent_shape = tuple(ct_ae.encode_stage_2_inputs(dummy).shape[1:])
     print(f"latent shape: {latent_shape}")
+
+    # ── Latent scale factor (CompVis LDM style) ───────────────────────────
+    first_batch = next(iter(train_loader))
+    with torch.no_grad():
+        _z = ct_ae.encode_stage_2_inputs(first_batch["ct"].to(device))
+        auto_scale = 1.0 / _z.flatten().std().item()
+    scale_factor = args.latent_scale_override if args.latent_scale_override is not None else auto_scale
+    print(f"[scale_factor] {scale_factor:.4f}  "
+          f"({'override' if args.latent_scale_override is not None else 'auto'})")
+    # ─────────────────────────────────────────────────────────────────────
 
     # ── Backbone ─────────────────────────────────────────────────────────
     if args.backbone == "uvit":
         backbone = UViT(
-            img_size    = spatial_size // args.compress_ratio,
-            patch_size  = args.uvit_patch_size,
-            in_chans    = latent_shape[0],
-            embed_dim   = args.uvit_embed_dim,
-            depth       = args.uvit_depth,
-            num_heads   = args.uvit_num_heads,
-            conv        = True,
+            img_size=args.spatial_size // args.compress_ratio,
+            patch_size=args.uvit_patch_size, in_chans=latent_shape[0],
+            embed_dim=args.uvit_embed_dim, depth=args.uvit_depth,
+            num_heads=args.uvit_num_heads, conv=True,
         ).to(device)
+        backbone = torch.compile(backbone)  
     else:
         COND_DIM = latent_shape[0] * latent_shape[1] * latent_shape[2]
         backbone = DiffusionModelUNet(
-            spatial_dims     = 2,
-            in_channels      = latent_shape[0],
-            out_channels     = latent_shape[0],
-            num_res_blocks   = args.unet_res_blocks,
-            channels         = tuple(args.unet_channels),
-            attention_levels = (True,) * len(args.unet_channels),
-            norm_num_groups  = 8,
-            num_head_channels= tuple(16 * 2**i for i in range(len(args.unet_channels))),
-            with_conditioning= True,
-            cross_attention_dim    = COND_DIM,
-            transformer_num_layers = 1,
-            use_flash_attention    = True,
+            spatial_dims=2, in_channels=latent_shape[0], out_channels=latent_shape[0],
+            num_res_blocks=args.unet_res_blocks, channels=tuple(args.unet_channels),
+            attention_levels=(True,) * len(args.unet_channels), norm_num_groups=8,
+            num_head_channels=tuple(16 * 2**i for i in range(len(args.unet_channels))),
+            with_conditioning=True, cross_attention_dim=COND_DIM,
+            transformer_num_layers=1, use_flash_attention=True,
         ).to(device)
-
-    n_params = sum(p.numel() for p in backbone.parameters())
-    print(f"[{args.backbone}] params: {n_params:,}")
-
+    print(f"[{args.backbone}] params: {sum(p.numel() for p in backbone.parameters()):,}")
     # ── VDM ──────────────────────────────────────────────────────────────
     vdm = VDM(
-        model      = backbone,
-        cfg        = SimpleNamespace(
-                         noise_schedule          = args.noise_schedule,
-                         gamma_min               = args.gamma_min,
-                         gamma_max               = args.gamma_max,
-                         antithetic_time_sampling= args.antithetic,
-                     ),
-        ae         = ct_ae,
-        image_shape= latent_shape,
+        model=backbone,
+        cfg=SimpleNamespace(noise_schedule=args.noise_schedule, gamma_min=args.gamma_min,
+                            gamma_max=args.gamma_max, antithetic_time_sampling=args.antithetic),
+        ae=ct_ae, image_shape=latent_shape,
+        scale_factor=scale_factor,
     ).to(device)
 
+    # [최적화] Inception: 항상 로드하되, FID 계산 시에만 사용
     inception = build_inception(device)
 
     # ── 옵티마이저 & 스케줄러 ─────────────────────────────────────────────
-    optimizer = torch.optim.AdamW(
-        backbone.parameters(), lr=args.lr,
-        betas=(0.99, 0.999), weight_decay=args.weight_decay, eps=1e-8,
-    )
+    optimizer = torch.optim.AdamW(backbone.parameters(), lr=args.lr,
+                                  betas=(0.9, 0.99), weight_decay=args.weight_decay, eps=1e-8)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer, _lr_lambda(args.warmup_steps)
+        optimizer, _lr_lambda(args.warmup_steps, args.num_steps)
     )
 
     # ── 상태 변수 ─────────────────────────────────────────────────────────
-    best_val_loss, global_step, eval_count = float("inf"), 0, 0
+    best_val_loss, global_step = float("inf"), 0
+    eval_count = 0  # eval 호출 횟수 카운터 (qual 저장 주기용)
 
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device)
-        sd = _remap_compiled_state_dict(ckpt["model_state_dict"], vdm)
-        vdm.load_state_dict(sd)
+        vdm.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         best_val_loss = ckpt.get("best_val_loss", float("inf"))
@@ -504,21 +468,22 @@ def main():
         print(f"[resume] step {global_step} | best_val_loss={best_val_loss:.4f}")
 
     # ── 학습 루프 ─────────────────────────────────────────────────────────
+    # metrics 키: vdm()이 반환하는 dict 기준 (bpd, diff_loss, latent_loss, recon_loss)
+    # 'loss' 키는 존재하지 않으므로 제거
     LOG_KEYS = ["bpd", "diff_loss", "latent_loss", "recon_loss"]
     log_m = {k: Mean(device=device) for k in LOG_KEYS}
     vdm.train()
-
     pbar = tqdm(range(global_step, args.num_steps), desc="Training",
                 initial=global_step, total=args.num_steps)
 
     for _ in pbar:
         batch    = next(train_iter)
-        ct_img   = batch["ct"].to(device)    # (B, n_slices, H, W)
-        cbct_img = batch["cbct"].to(device)  # (B, n_slices, H, W)
+        ct_img   = batch["ct"].to(device)
+        cbct_img = batch["cbct"].to(device)
 
         with torch.no_grad():
-            z      = ct_ae.encode_stage_2_inputs(ct_img)
-            z_cond = cbct_ae.encode_stage_2_inputs(cbct_img)
+            z      = ct_ae.encode_stage_2_inputs(ct_img)   * scale_factor
+            z_cond = cbct_ae.encode_stage_2_inputs(cbct_img) * scale_factor
         cond = _prepare_cond(z_cond, args.backbone)
 
         optimizer.zero_grad()
@@ -547,27 +512,22 @@ def main():
         # eval
         if global_step % args.eval_every == 0:
             eval_count += 1
-            result = evaluate(
-                vdm, ct_ae, cbct_ae, val_loader, args,
-                device, global_step, ckpt_dir, inception, eval_count,
-            )
+            result = evaluate(vdm, ct_ae, cbct_ae, val_loader, args,
+                              device, global_step, ckpt_dir, inception, eval_count, scale_factor)
             val_loss = result["val_loss"]
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                save_ckpt(ckpt_dir / "best.pt", global_step, vdm,
-                          optimizer, scheduler, best_val_loss)
+                save_ckpt(ckpt_dir / "best.pt", global_step, vdm, optimizer, scheduler, best_val_loss)
                 print(f"[best] step {global_step}  val_loss={best_val_loss:.4f}")
 
-            save_ckpt(ckpt_dir / "latest.pt", global_step, vdm,
-                      optimizer, scheduler, best_val_loss)
+            save_ckpt(ckpt_dir / "latest.pt", global_step, vdm, optimizer, scheduler, best_val_loss)
 
     # 마지막 eval
     if global_step % args.eval_every != 0:
         eval_count += 1
         evaluate(vdm, ct_ae, cbct_ae, val_loader, args,
-                 device, global_step, ckpt_dir, inception, eval_count)
-
+                 device, global_step, ckpt_dir, inception, eval_count, scale_factor)
     finish()
 
 

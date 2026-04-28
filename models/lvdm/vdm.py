@@ -9,13 +9,14 @@ import pdb
 
 
 class VDM(nn.Module):
-    def __init__(self, model, cfg, ae, image_shape):
+    def __init__(self, model, cfg, ae, image_shape, scale_factor: float = 1.0):
         super().__init__()
         self.model = model
         self.cfg = cfg
         self.image_shape = image_shape
         self.vocab_size = 1
         self.ae = ae
+        self.scale_factor = scale_factor
         if cfg.noise_schedule == "fixed_linear":
             self.gamma = FixedLinearSchedule(cfg.gamma_min, cfg.gamma_max)
         elif cfg.noise_schedule == "learned_linear":
@@ -28,14 +29,13 @@ class VDM(nn.Module):
         return next(self.model.parameters()).device
 
     @torch.no_grad()
-    def sample_p_s_t(self, z, t, s, clip_samples, context=None, eta: float=0.0):
+    def sample_p_s_t(self, z, t, s, context=None, eta: float=0.0):
         """Samples from p(z_s | z_t, x). Used for standard ancestral sampling."""
         gamma_t = self.gamma(t)
         gamma_s = self.gamma(s)
         c = -expm1(gamma_s - gamma_t)
         alpha_t = sqrt(sigmoid(-gamma_t))
         alpha_s = sqrt(sigmoid(-gamma_s))
-        sigma_t = sqrt(sigmoid(gamma_t))
         sigma_s = sqrt(sigmoid(gamma_s))
 
         from monai.networks.nets import DiffusionModelUNet
@@ -44,22 +44,16 @@ class VDM(nn.Module):
         ) else gamma_t
         z_hat = self.model(x=z, timesteps=gamma_t_in, context=context)
 
-        if clip_samples:
-            z_hat =  z_hat.clamp_(0.0, 1.0)
-            mean = alpha_s * (z * (1 - c) / alpha_t + c * z_hat)
-        
-        else:
-            mean = alpha_s * (z * (1 - c) / alpha_t + c * z_hat)
-        
+        mean = alpha_s * (z * (1 - c) / alpha_t + c * z_hat)
         scale = eta * sigma_s * sqrt(c)
         return mean + scale * torch.randn_like(z)
 
     @torch.no_grad()
-    def sample(self, batch_size, n_sample_steps, clip_samples, y=None):
+    def sample(self, batch_size, n_sample_steps, y=None):
         z = torch.randn((batch_size, *self.image_shape), device=self.device)
         steps = linspace(1.0, 0.0, n_sample_steps + 1, device=self.device)
         for i in trange(n_sample_steps, desc="sampling"):
-            z = self.sample_p_s_t(z, steps[i], steps[i + 1], clip_samples, context=y)
+            z = self.sample_p_s_t(z, steps[i], steps[i + 1], context=y)
         return z
 
     def sample_q_t_0(self, x, times, noise=None):
@@ -95,8 +89,8 @@ class VDM(nn.Module):
         z0   = alpha0 * f + sigma0 * eps
         z0_r = z0 / alpha0
         with torch.no_grad():
-            x_dist = self.ae.decode_stage_2_outputs(z0_r)          # returns distribution
-        mse = 0.5 * ((img - x_dist)**2).sum((1,2,3)) 
+            x_dist = self.ae.decode_stage_2_outputs(z0_r / self.scale_factor)
+        mse = 0.5 * ((img - x_dist)**2).sum((1,2,3))
         return mse
 
 
