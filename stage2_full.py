@@ -1,30 +1,16 @@
-"""stage2_vdm.py — VDM 학습 (Stage 2).
+"""stage2_full.py — VDM 학습 (Stage 2).
 
 - Stage 1 VQVAE (CT, CBCT) 고정
 - CT latent → VDM denoising (conditioned on CBCT latent)
 - backbone: UViT or DiffusionModelUNet
 - 로깅: WandB
 - 평가: SSIM, PSNR, MSE, FID (step 기반)
-
-[데이터셋 변경사항]
-- 볼륨 단위 → 슬라이스 단위 학습 (split_dataset 사용)
-- train: 전체 슬라이스 / val: 케이스당 중간 슬라이스 1장만 (val_middle_only=True)
-- 케이스 단위 split으로 data leakage 방지
-- 두 데이터 경로(Task2_Train, Task2_Train_D) 동시 로드
-
-[최적화 변경사항]
-- sample_steps_eval 기본값: 100 → 20
-- eval_every 기본값: 2_000 → 5_000
-- num_eval_samples 기본값: 8 → 4
-- FID 계산: step > fid_warmup_steps 이후에만 실행 (기본 10_000)
-- qualitative grid 저장: eval_every * qual_save_every 마다만 저장
-- DataLoader persistent_workers=True, prefetch_factor=2 추가
+- 데이터: data/preprocess.py 로 미리 저장된 슬라이스 파일 사용
 """
 from __future__ import annotations
 
 import argparse
 import json
-import math
 import pathlib
 from types import SimpleNamespace
 
@@ -43,8 +29,7 @@ from monai.metrics.fid import FIDMetric
 from monai.networks.nets import VQVAE, DiffusionModelUNet
 from monai.utils import set_determinism
 
-# 새 슬라이스 단위 데이터셋
-from data.dataset import SynthRad2025, build_transforms, split_dataset
+from data.preprocessed_dataset import PreprocessedDataset, build_preprocessed_transforms
 
 from models.lvdm.uvit import UViT
 from models.lvdm.vdm import VDM
@@ -60,13 +45,10 @@ def get_args():
     p = argparse.ArgumentParser(description="Stage2 VDM 학습")
 
     # ── 데이터 ───────────────────────────────────────────────────────────
-    p.add_argument("--data_root",        type=str,
-                   default="/data/prof2/mai/s2025/dataset",
-                   help="synthRAD2025_Task2_Train / _Train_D 의 상위 디렉토리")
-    p.add_argument("--anatomy",          nargs="+",  default=["AB", "HN", "TH"])
-    p.add_argument("--spatial_size",     type=int,   default=128)
+    p.add_argument("--preprocessed_root", type=str,
+                   default="../s2025/dataset/preprocessed",
+                   help="data/preprocess.py 의 --output_root 경로")
     p.add_argument("--num_workers",      type=int,   default=4)
-    p.add_argument("--val_ratio",        type=float, default=0.2)
 
     # ── 모델 ────────────────────────────────────────────────────────────
     p.add_argument("--in_channels",      type=int,   default=9)
@@ -95,9 +77,9 @@ def get_args():
     p.add_argument("--batch_size",       type=int,   default=16)
     p.add_argument("--num_steps",        type=int,   default=100_000)
     p.add_argument("--lr",               type=float, default=2e-4)
-    p.add_argument("--weight_decay",     type=float, default=1e-4)
+    p.add_argument("--weight_decay",     type=float, default=0.03)
     p.add_argument("--amp",              action="store_true", default=True)
-    p.add_argument("--warmup_steps",     type=int,   default=5_000)
+    p.add_argument("--warmup_steps",     type=int,   default=2_500)
 
     # ── Eval ─────────────────────────────────────────────────────────────
     p.add_argument("--eval_every",       type=int,   default=5_000)
@@ -147,6 +129,33 @@ def infinite_loader(loader: DataLoader):
             yield batch
 
 
+def _remap_compiled_state_dict(sd: dict, model: torch.nn.Module) -> dict:
+    """torch.compile() 전후 저장된 체크포인트의 _orig_mod 키 불일치를 자동 수정."""
+    model_keys = set(model.state_dict().keys())
+    if model_keys == set(sd.keys()):
+        return sd
+
+    # ckpt: model.xxx  →  현재: model._orig_mod.xxx (compile 후 로드)
+    remapped = {
+        ("model._orig_mod." + k[len("model."):] if k.startswith("model.") and not k.startswith("model._orig_mod.") else k): v
+        for k, v in sd.items()
+    }
+    if model_keys == set(remapped.keys()):
+        print("[resume] _orig_mod 키 리매핑 적용 (compile 전 ckpt → compile 후 모델)")
+        return remapped
+
+    # ckpt: model._orig_mod.xxx  →  현재: model.xxx (compile 없이 로드)
+    remapped = {
+        (k.replace("model._orig_mod.", "model.", 1) if k.startswith("model._orig_mod.") else k): v
+        for k, v in sd.items()
+    }
+    if model_keys == set(remapped.keys()):
+        print("[resume] _orig_mod 키 제거 적용 (compile 후 ckpt → compile 전 모델)")
+        return remapped
+
+    return sd  # 매핑 실패 시 원본 반환 (load_state_dict에서 에러 출력)
+
+
 def _prepare_cond(z_cond: torch.Tensor, backbone: str) -> torch.Tensor:
     """backbone 종류에 따라 conditioning tensor 형태 조정."""
     if backbone == "unet":
@@ -155,12 +164,11 @@ def _prepare_cond(z_cond: torch.Tensor, backbone: str) -> torch.Tensor:
     return z_cond
 
 
-def _lr_lambda(warmup_steps: int, total_steps: int, min_lr_ratio: float = 0.1):
+def _lr_lambda(warmup_steps: int):
     def fn(step):
         if step < warmup_steps:
             return step / max(1, warmup_steps)
-        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
-        return max(min_lr_ratio, 0.5 * (1.0 + math.cos(math.pi * progress)))
+        return 1.0
     return fn
 
 
@@ -373,27 +381,22 @@ def main():
         print(f"GPU: {torch.cuda.get_device_name(args.device)}")
 
     # ── 데이터 ───────────────────────────────────────────────────────────
-    ss = (args.spatial_size, args.spatial_size)
-
-    # 두 경로 모두 Task2/ 하위에 AB/HN/TH 구조
-    data_roots = [
-        f"{args.data_root}/synthRAD2025_Task2_Train/Task2",
-        f"{args.data_root}/synthRAD2025_Task2_Train_D/Task2",
-    ]
-
-    train_ds, val_ds = split_dataset(
-        root             = data_roots,
-        modality         = ["cbct", "ct"],
-        anatomy          = args.anatomy,
-        n_slices         = args.in_channels,
-        val_ratio        = args.val_ratio,
-        seed             = args.seed,
-        val_middle_only  = True,      # val은 케이스당 중간 슬라이스 1장
-        train_transform  = build_transforms(["cbct", "ct"], spatial_size=ss, augment=True),
-        val_transform    = build_transforms(["cbct", "ct"], spatial_size=ss, augment=False),
+    train_ds = PreprocessedDataset(
+        preprocessed_root = args.preprocessed_root,
+        split    = "train",
+        n_slices = args.in_channels,
+        modality = ["cbct", "ct"],
+        transform = build_preprocessed_transforms(["cbct", "ct"], augment=True),
     )
-    print(f"train: {len(train_ds)}슬라이스 ({len(train_ds.subject_dirs)}케이스) | "
-          f"val: {len(val_ds)}슬라이스 ({len(val_ds.subject_dirs)}케이스)")
+    val_ds = PreprocessedDataset(
+        preprocessed_root = args.preprocessed_root,
+        split    = "val",
+        n_slices = args.in_channels,
+        modality = ["cbct", "ct"],
+        transform = build_preprocessed_transforms(["cbct", "ct"], augment=False),
+    )
+    print(f"train: {len(train_ds):,}슬라이스 ({len(train_ds.subject_dirs)}케이스) | "
+          f"val: {len(val_ds):,}슬라이스 ({len(val_ds.subject_dirs)}케이스)")
 
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size,
@@ -411,6 +414,15 @@ def main():
     )
     train_iter = infinite_loader(train_loader)
 
+    # 전처리 메타에서 spatial_size 읽기
+    _meta_candidates = sorted(pathlib.Path(args.preprocessed_root).glob("split_seed*.json"))
+    if _meta_candidates:
+        _meta = json.loads(_meta_candidates[0].read_text()).get("meta", {})
+        spatial_size = int(_meta.get("spatial_size", 128))
+    else:
+        spatial_size = 128
+    print(f"spatial_size: {spatial_size}")
+
     # ── VQVAE ────────────────────────────────────────────────────────────
     vqvae_kwargs = dict(out_channels=1, compress_ratio=args.compress_ratio,
                         embedding_dim=args.embedding_dim, num_embeddings=args.num_embeddings)
@@ -418,14 +430,14 @@ def main():
     cbct_ae = load_frozen_vqvae(args.cbct_ckpt, device, in_channels=args.in_channels, **vqvae_kwargs)
 
     with torch.no_grad():
-        dummy        = torch.zeros(1, args.in_channels, args.spatial_size, args.spatial_size, device=device)
+        dummy        = torch.zeros(1, args.in_channels, spatial_size, spatial_size, device=device)
         latent_shape = tuple(ct_ae.encode_stage_2_inputs(dummy).shape[1:])
     print(f"latent shape: {latent_shape}")
 
     # ── Backbone ─────────────────────────────────────────────────────────
     if args.backbone == "uvit":
         backbone = UViT(
-            img_size    = args.spatial_size // args.compress_ratio,
+            img_size    = spatial_size // args.compress_ratio,
             patch_size  = args.uvit_patch_size,
             in_chans    = latent_shape[0],
             embed_dim   = args.uvit_embed_dim,
@@ -433,7 +445,6 @@ def main():
             num_heads   = args.uvit_num_heads,
             conv        = True,
         ).to(device)
-        backbone = torch.compile(backbone)
     else:
         COND_DIM = latent_shape[0] * latent_shape[1] * latent_shape[2]
         backbone = DiffusionModelUNet(
@@ -472,10 +483,10 @@ def main():
     # ── 옵티마이저 & 스케줄러 ─────────────────────────────────────────────
     optimizer = torch.optim.AdamW(
         backbone.parameters(), lr=args.lr,
-        betas=(0.9, 0.99), weight_decay=args.weight_decay, eps=1e-8,
+        betas=(0.99, 0.999), weight_decay=args.weight_decay, eps=1e-8,
     )
     scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer, _lr_lambda(args.warmup_steps, args.num_steps)
+        optimizer, _lr_lambda(args.warmup_steps)
     )
 
     # ── 상태 변수 ─────────────────────────────────────────────────────────
@@ -483,7 +494,8 @@ def main():
 
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device)
-        vdm.load_state_dict(ckpt["model_state_dict"])
+        sd = _remap_compiled_state_dict(ckpt["model_state_dict"], vdm)
+        vdm.load_state_dict(sd)
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         best_val_loss = ckpt.get("best_val_loss", float("inf"))

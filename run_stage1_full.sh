@@ -7,7 +7,8 @@
 set -e
 mkdir -p logs
 
-DATA=/data/prof2/mai/s2025/dataset
+DATA=../s2025/dataset
+PREPROCESSED=${DATA}/preprocessed
 CKPT_DIR=checkpoints/stage1_vqvae
 BATCH=128
 WORKERS=8
@@ -22,21 +23,21 @@ run() {
     fi
 
     PYTHONPATH=. python stage1_full.py \
-        --modality       $MOD \
-        --in_channels    $N \
-        --compress_ratio $CPR \
-        --embedding_dim  1 \
-        --num_embeddings 2048 \
-        --data_root      $DATA \
-        --exp_name       $NAME \
-        --device         $GPU \
-        --batch_size     $BATCH \
-        --num_workers    $WORKERS \
-        --num_epochs     100 \
-        --patience       10 \
-        --lr_g           1e-4 \
-        --lr_d           5e-5 \
-        --wandb_project  cbct2ct-stage1-full \
+        --modality            $MOD \
+        --in_channels         $N \
+        --compress_ratio      $CPR \
+        --embedding_dim       1 \
+        --num_embeddings      2048 \
+        --preprocessed_root   $PREPROCESSED \
+        --exp_name            $NAME \
+        --device              $GPU \
+        --batch_size          $BATCH \
+        --num_workers         $WORKERS \
+        --num_epochs          100 \
+        --patience            10 \
+        --lr_g                1e-4 \
+        --lr_d                5e-5 \
+        --wandb_project       cbct2ct-stage1-full \
         $RESUME_ARG \
         > logs/${NAME}.log 2>&1 &
 
@@ -48,18 +49,7 @@ for MOD in cbct; do
 
     # n ablation: cpr4 고정, n1,n3,n5,n7,n9
     echo "--- [$MOD] n ablation @ cpr4: n1,n3,n5 ---"
-    run $MOD 1 4 4
-    run $MOD 3 4 5
-    run $MOD 5 4 6
-    wait
-
-    echo "--- [$MOD] n ablation @ cpr4: n7,n9 / n5: cpr2---"
-    run $MOD 7 4 4
-    run $MOD 9 4 5
-    run $MOD 5 2 6
-    wait
-
-    echo "=== [$MOD] done ==="
+    run $MOD 1 4 0
 done
 
 echo "=== All stage1 full ablations done ==="

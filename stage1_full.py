@@ -1,15 +1,14 @@
 """stage1_vqvae.py — VQVAE 학습 (Stage 1).
 
-데이터: SynthRad2025 (슬라이스 단위)
+데이터: PreprocessedDataset (전처리된 슬라이스 .npy)
   - in:  (B, N, H, W)  N = in_channels (슬라이스 수)
   - out: (B, 1, H, W)  중앙 슬라이스만
 로깅: WandB
 
 [데이터셋 변경사항]
-- 볼륨 단위 → 슬라이스 단위 학습 (split_dataset 사용)
-- train: 전체 슬라이스 / val: 케이스당 중간 슬라이스 1장만 (val_middle_only=True)
-- 케이스 단위 split으로 data leakage 방지
-- 두 데이터 경로(Task2_Train, Task2_Train_D) 동시 로드
+- data/preprocess.py 로 미리 저장된 슬라이스 파일 사용 → DataLoader stall 제거
+- train: 전체 슬라이스 / val: 케이스당 중간 슬라이스 1장만
+- 케이스 단위 split (seed=42) — split_seed42.json 에 기록됨
 """
 from __future__ import annotations
 
@@ -26,8 +25,11 @@ from monai.losses.perceptual import PerceptualLoss
 from monai.networks.nets import VQVAE, PatchDiscriminator
 from monai.utils import set_determinism
 
-# 새 슬라이스 단위 데이터셋
-from data.dataset import build_transforms, split_dataset
+# 전처리된 슬라이스 파일 기반 데이터셋
+from data.preprocessed_dataset import (
+    PreprocessedDataset,
+    build_preprocessed_transforms,
+)
 
 from models.lvdm.utils import get_lr, setup_scheduler
 from utils.wandb import finish, init_wandb, log_images, log_train, log_val
@@ -73,13 +75,10 @@ def get_args():
     p = argparse.ArgumentParser(description="Stage1 VQVAE 학습")
 
     # ── 데이터 ───────────────────────────────────────────────────────────
-    p.add_argument("--data_root",      type=str,
-                   default="/data/prof2/mai/s2025/dataset",
-                   help="synthRAD2025_Task2_Train / _Train_D 의 상위 디렉토리")
-    p.add_argument("--anatomy",        nargs="+",  default=["AB", "HN", "TH"])
-    p.add_argument("--spatial_size",   type=int,   default=128)
+    p.add_argument("--preprocessed_root", type=str,
+                   default="/data/prof2/mai/s2025/dataset/preprocessed",
+                   help="data/preprocess.py 의 --output_root 경로")
     p.add_argument("--num_workers",    type=int,   default=4)
-    p.add_argument("--val_ratio",      type=float, default=0.2)
     p.add_argument("--modality",       type=str,   default="ct", choices=["cbct", "ct"])
 
     # ── 모델 ────────────────────────────────────────────────────────────
@@ -120,12 +119,12 @@ def main():
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     print(f"[ckpt] {ckpt_dir}")
 
-    init_wandb(
-        config=vars(args),
-        project=args.wandb_project,
-        experiment_name=args.exp_name,
-        entity=args.wandb_entity,
-    )
+    # init_wandb(
+    #     config=vars(args),
+    #     project=args.wandb_project,
+    #     experiment_name=args.exp_name,
+    #     entity=args.wandb_entity,
+    # )
     set_determinism(seed=args.seed)
 
     device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
@@ -134,27 +133,22 @@ def main():
         print(f"GPU: {torch.cuda.get_device_name(args.device)}")
 
     # ── 데이터 ───────────────────────────────────────────────────────────
-    ss = (args.spatial_size, args.spatial_size)
-
-    # 두 경로 모두 Task2/ 하위에 AB/HN/TH 구조
-    data_roots = [
-        f"{args.data_root}/synthRAD2025_Task2_Train/Task2",
-        f"{args.data_root}/synthRAD2025_Task2_Train_D/Task2",
-    ]
-
-    train_ds, val_ds = split_dataset(
-        root             = data_roots,
-        modality         = [args.modality],
-        anatomy          = args.anatomy,
-        n_slices         = args.in_channels,
-        val_ratio        = args.val_ratio,
-        seed             = args.seed,
-        val_middle_only  = True,      # val은 케이스당 중간 슬라이스 1장
-        train_transform  = build_transforms([args.modality], spatial_size=ss, augment=True),
-        val_transform    = build_transforms([args.modality], spatial_size=ss, augment=False),
+    train_ds = PreprocessedDataset(
+        preprocessed_root = args.preprocessed_root,
+        split     = "train",
+        n_slices  = args.in_channels,
+        modality  = [args.modality],
+        transform = build_preprocessed_transforms([args.modality], augment=True),
     )
-    print(f"train: {len(train_ds)}슬라이스 ({len(train_ds.subject_dirs)}케이스) | "
-          f"val: {len(val_ds)}슬라이스 ({len(val_ds.subject_dirs)}케이스)")
+    val_ds = PreprocessedDataset(
+        preprocessed_root = args.preprocessed_root,
+        split     = "val",
+        n_slices  = args.in_channels,
+        modality  = [args.modality],
+        transform = build_preprocessed_transforms([args.modality], augment=False),
+    )
+    print(f"train: {len(train_ds):,}슬라이스 ({len(train_ds.subject_dirs)}케이스) | "
+          f"val: {len(val_ds):,}슬라이스 ({len(val_ds.subject_dirs)}케이스)")
 
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size,
