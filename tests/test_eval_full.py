@@ -96,3 +96,29 @@ def test_load_model_for_eval_keys():
     assert "val_ds" in result
     assert "subj_anatomy" in result
     assert isinstance(result["scale_factor"], float)
+
+
+from eval_full import evaluate_model
+
+def test_evaluate_model_output_schema():
+    """evaluate_model이 올바른 컬럼을 가진 DataFrame을 반환해야 한다."""
+    import os
+    data_root = os.environ.get("DATA_ROOT", "/home/dministrator/s2025")
+    ckpt_base  = "checkpoints_임베딩1/stage2_vdm"
+    vqvae_base = "checkpoints_임베딩1/stage1_vqvae"
+    if not pathlib.Path(ckpt_base).exists():
+        import pytest; pytest.skip("checkpoints not available")
+
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    cfg = {"key": "uvit_n5_cpr4", "backbone": "uvit", "n": 5, "cpr": 4}
+    loaded = load_model_for_eval(cfg, data_root, ckpt_base, vqvae_base, device)
+    rows = evaluate_model(cfg, loaded, device, n_sample_steps=10)
+
+    import pandas as pd
+    df = pd.DataFrame(rows)
+    assert set(df.columns) >= {"model", "anatomy", "subj_id", "psnr", "ssim", "mse"}
+    assert len(df) == len(loaded["val_ds"])
+    assert df["anatomy"].isin(["AB", "HN", "TH"]).all()
+    assert (df["psnr"] > 0).all()
+    assert (df["ssim"].between(-1, 1)).all()
+    assert (df["mse"] >= 0).all()

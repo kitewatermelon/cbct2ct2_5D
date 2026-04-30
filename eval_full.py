@@ -218,3 +218,56 @@ def load_model_for_eval(
         val_loader=val_loader, subj_anatomy=subj_anatomy,
         latent_shape=latent_shape,
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-sample inference
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def evaluate_model(
+    cfg: dict,
+    loaded: dict,
+    device: torch.device,
+    n_sample_steps: int = 200,
+) -> list[dict]:
+    from stage2_vdm import _prepare_cond, sample_conditional
+
+    ct_ae        = loaded["ct_ae"]
+    cbct_ae      = loaded["cbct_ae"]
+    vdm          = loaded["vdm"]
+    scale_factor = loaded["scale_factor"]
+    val_loader   = loaded["val_loader"]
+    subj_anatomy = loaded["subj_anatomy"]
+    backbone     = cfg["backbone"]
+    n            = cfg["n"]
+    mid          = n // 2
+    key          = cfg["key"]
+
+    rows = []
+    for batch in tqdm(val_loader, desc=key, leave=False):
+        ct_img   = batch["ct"].to(device)
+        cbct_img = batch["cbct"].to(device)
+        subj_ids = batch["subj_id"]
+
+        z_cond = cbct_ae.encode_stage_2_inputs(cbct_img) * scale_factor
+        cond   = _prepare_cond(z_cond, backbone)
+
+        sampled_z = sample_conditional(vdm, cond, n_sample_steps, device)
+        ct_gen    = ct_ae.decode_stage_2_outputs(sampled_z / scale_factor)
+        ct_gt     = ct_img[:, mid:mid+1].float()
+
+        ct_gen = ct_gen.float().clamp(0.0, 1.0)
+        ct_gt  = ct_gt.clamp(0.0, 1.0)
+
+        for i in range(ct_gen.shape[0]):
+            sid = subj_ids[i]
+            rows.append({
+                "model"   : key,
+                "anatomy" : subj_anatomy.get(sid, "UNKNOWN"),
+                "subj_id" : sid,
+                "psnr"    : compute_psnr(ct_gen[i:i+1], ct_gt[i:i+1]),
+                "ssim"    : compute_ssim(ct_gen[i:i+1], ct_gt[i:i+1]),
+                "mse"     : compute_mse(ct_gen[i:i+1],  ct_gt[i:i+1]),
+            })
+    return rows
