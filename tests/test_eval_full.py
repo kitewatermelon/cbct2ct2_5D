@@ -3,6 +3,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 import math
 import torch
+import pytest
 from eval_full import MODEL_CONFIGS, compute_psnr, compute_ssim, compute_mse
 
 def test_model_configs_count():
@@ -19,12 +20,12 @@ def test_model_configs_keys():
 
 def test_compute_psnr_perfect():
     x = torch.ones(1, 1, 4, 4) * 0.5
-    assert compute_psnr(x, x) == 100.0
+    assert math.isinf(compute_psnr(x, x))
 
 def test_compute_psnr_known():
     pred   = torch.zeros(1, 1, 4, 4)
     target = torch.ones(1, 1, 4, 4)
-    # mse=1.0 → psnr = 20*log10(1/1) = 0.0
+    # mse=1.0 → psnr = 10*log10(1/1) = 0.0
     assert abs(compute_psnr(pred, target) - 0.0) < 1e-4
 
 def test_compute_ssim_range():
