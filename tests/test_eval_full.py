@@ -122,3 +122,25 @@ def test_evaluate_model_output_schema():
     assert (df["psnr"] > 0).all()
     assert (df["ssim"].between(-1, 1)).all()
     assert (df["mse"] >= 0).all()
+
+
+from eval_full import save_results
+import tempfile, os
+
+def test_save_results_creates_files():
+    import pandas as pd
+    rows = [
+        {"model":"uvit_n1_cpr4","anatomy":"AB","subj_id":"s001","psnr":30.0,"ssim":0.90,"mse":0.001},
+        {"model":"uvit_n1_cpr4","anatomy":"HN","subj_id":"s002","psnr":32.0,"ssim":0.91,"mse":0.0009},
+        {"model":"uvit_n5_cpr4","anatomy":"AB","subj_id":"s001","psnr":33.0,"ssim":0.92,"mse":0.0008},
+        {"model":"uvit_n5_cpr4","anatomy":"HN","subj_id":"s002","psnr":34.0,"ssim":0.93,"mse":0.0007},
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_results(rows, output_dir=tmpdir)
+        assert os.path.exists(os.path.join(tmpdir, "raw_metrics.csv"))
+        assert os.path.exists(os.path.join(tmpdir, "summary_stats.csv"))
+        df = pd.read_csv(os.path.join(tmpdir, "raw_metrics.csv"))
+        assert len(df) == 4
+        summary = pd.read_csv(os.path.join(tmpdir, "summary_stats.csv"))
+        assert "psnr_mean" in summary.columns
+        assert "ssim_std" in summary.columns

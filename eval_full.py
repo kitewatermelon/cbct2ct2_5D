@@ -271,3 +271,25 @@ def evaluate_model(
                 "mse"     : compute_mse(ct_gen[i:i+1],  ct_gt[i:i+1]),
             })
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+def save_results(rows: list[dict], output_dir: str) -> None:
+    out = pathlib.Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    df = pd.DataFrame(rows)
+    df.to_csv(out / "raw_metrics.csv", index=False)
+
+    summary = (
+        df.groupby(["model", "anatomy"])[["psnr", "ssim", "mse"]]
+        .agg(["mean", "std", "median"])
+    )
+    summary.columns = ["_".join(c) for c in summary.columns]
+    summary = summary.reset_index()
+    summary.to_csv(out / "summary_stats.csv", index=False)
+    print(f"[저장] {out/'raw_metrics.csv'}  ({len(df)}행)")
+    print(f"[저장] {out/'summary_stats.csv'}")
