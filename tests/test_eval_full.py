@@ -4,7 +4,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 import math
 import torch
 import pytest
-from eval_full import MODEL_CONFIGS, compute_psnr, compute_ssim, compute_mse
+from eval.eval_full import MODEL_CONFIGS, compute_psnr, compute_ssim, compute_mse
 
 def test_model_configs_count():
     assert len(MODEL_CONFIGS) == 8
@@ -44,7 +44,7 @@ def test_compute_mse_known():
     assert abs(compute_mse(pred, target) - 4.0) < 1e-6
 
 
-from eval_full import build_val_split
+from eval.eval_full import build_val_split
 
 def test_val_split_reproducible():
     """같은 seed로 두 번 split하면 동일한 indices가 나와야 한다."""
@@ -73,13 +73,13 @@ def test_val_split_ratio():
     assert len(indices) == expected_n_val
 
 
-from eval_full import load_model_for_eval
+from eval.eval_full import load_model_for_eval
 
 def test_load_model_for_eval_keys():
     import os
     data_root = os.environ.get("DATA_ROOT", "/home/dministrator/s2025")
-    ckpt_base = "checkpoints_임베딩1/stage2_vdm"
-    vqvae_base = "checkpoints_임베딩1/stage1_vqvae"
+    ckpt_base = "checkpoints/stage2_vdm"
+    vqvae_base = "checkpoints/stage1_vqvae"
     if not pathlib.Path(ckpt_base).exists():
         import pytest; pytest.skip("checkpoints not available")
 
@@ -99,14 +99,14 @@ def test_load_model_for_eval_keys():
     assert isinstance(result["scale_factor"], float)
 
 
-from eval_full import evaluate_model
+from eval.eval_full import evaluate_model
 
 def test_evaluate_model_output_schema():
     """evaluate_model이 올바른 컬럼을 가진 DataFrame을 반환해야 한다."""
     import os
     data_root = os.environ.get("DATA_ROOT", "/home/dministrator/s2025")
-    ckpt_base  = "checkpoints_임베딩1/stage2_vdm"
-    vqvae_base = "checkpoints_임베딩1/stage1_vqvae"
+    ckpt_base  = "checkpoints/stage2_vdm"
+    vqvae_base = "checkpoints/stage1_vqvae"
     if not pathlib.Path(ckpt_base).exists():
         import pytest; pytest.skip("checkpoints not available")
 
@@ -126,7 +126,7 @@ def test_evaluate_model_output_schema():
     assert isinstance(fid_val, float)
 
 
-from eval_full import save_results
+from eval.eval_full import save_results
 import tempfile, os
 
 def test_save_results_creates_files():
@@ -150,7 +150,7 @@ def test_save_results_creates_files():
         assert "fid" in summary.columns
 
 
-from eval_full import save_boxplots
+from eval.eval_full import save_boxplots
 import pandas as pd
 
 def test_save_boxplots_creates_pngs():

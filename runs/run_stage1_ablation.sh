@@ -18,7 +18,7 @@ run() {
         RESUME_ARG="--resume $LATEST"
     fi
 
-    PYTHONPATH=. python stage1_vqvae.py \
+    PYTHONPATH=. python train/stage1_vqvae.py \
         --modality $MOD --in_channels $N --compress_ratio $CPR \
         --exp_name $NAME --data_root $DATA --device $GPU --embedding_dim 1 \
         $RESUME_ARG \

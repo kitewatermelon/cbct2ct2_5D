@@ -1,6 +1,8 @@
+temp/*
 wandb/*
 checkpoints*/*
 verify_output/*
+eval_results/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

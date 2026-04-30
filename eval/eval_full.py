@@ -2,9 +2,12 @@
 
 8개 모델을 stage2_vdm.py와 동일한 val split에서 평가.
 출력: eval_results/raw_metrics.csv, summary_stats.csv, boxplot_*.png
+
+--gen_dir 지정 시 eval_gen.py가 저장한 .mha 파일에서 바로 metric 계산 (모델 로딩 불필요).
 """
 from __future__ import annotations
-import argparse, pathlib
+import argparse, json, pathlib
+import numpy as np
 import torch
 import torch.nn.functional as F
 import pandas as pd
@@ -13,14 +16,15 @@ from torch.utils.data import DataLoader, random_split
 from monai.metrics import PSNRMetric, SSIMMetric
 from monai.metrics.fid import FIDMetric
 from monai.utils import set_determinism
-from torchvision.models import inception_v3
 from tqdm.auto import tqdm
 
 from data.synthrad2025 import SynthRad2025, build_transforms
+from utils.inception import build_inception, inception_feats
+from utils.mha import load_mha
 
 # Try to import from stage2_vdm, but allow graceful failure for testing
 try:
-    from stage2_vdm import (
+    from train.stage2_vdm import (
         build_vqvae, load_frozen_vqvae, _prepare_cond,
         sample_conditional, build_vdm,
     )
@@ -48,20 +52,6 @@ MODEL_CONFIGS: list[dict] = [
 
 _psnr_metric = PSNRMetric(max_val=1.0)
 _ssim_metric = SSIMMetric(data_range=1.0, spatial_dims=2)
-
-
-def build_inception(device: torch.device):
-    m = inception_v3(pretrained=True, transform_input=False).to(device)
-    m.fc = torch.nn.Identity()
-    m.eval()
-    return m
-
-
-@torch.no_grad()
-def inception_feats(x: torch.Tensor, model) -> torch.Tensor:
-    """x: (B, 1, H, W) in [0, 1] → InceptionV3 features."""
-    x = x.clamp(0.0, 1.0).repeat(1, 3, 1, 1)
-    return model(x).flatten(1)
 
 
 def compute_psnr(pred: torch.Tensor, target: torch.Tensor) -> float:
@@ -103,6 +93,30 @@ def build_val_split(
     return list(val_ds.indices)
 
 
+def build_val_loader(
+    data_root: str, n: int,
+    val_ratio: float = 0.2, seed: int = 42,
+    batch_size: int = 8, num_workers: int = 4,
+    pin_memory: bool = False,
+) -> DataLoader:
+    """Val split DataLoader — same deterministic split used everywhere."""
+    full_ds = SynthRad2025(
+        root=f"{data_root}/dataset/train/n{n}",
+        modality=["cbct", "ct"], anatomy=["AB", "HN", "TH"],
+        transform=build_transforms(["cbct", "ct"], spatial_size=(128, 128), augment=False),
+    )
+    n_val   = int(len(full_ds) * val_ratio)
+    n_train = len(full_ds) - n_val
+    _, val_ds = random_split(
+        full_ds, [n_train, n_val],
+        generator=torch.Generator().manual_seed(seed),
+    )
+    return DataLoader(
+        val_ds, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=pin_memory,
+    )
+
+
 def build_subj_anatomy_map(data_root: str, n: int) -> dict[str, str]:
     """subj_id → anatomy 매핑 딕셔너리 반환."""
     full_ds = SynthRad2025(
@@ -133,7 +147,7 @@ def load_model_for_eval(
     batch_size: int = 8,
     num_workers: int = 4,
 ) -> dict:
-    from stage2_vdm import build_vqvae, load_frozen_vqvae, build_vdm
+    from train.stage2_vdm import build_vqvae, load_frozen_vqvae, build_vdm
 
     n, cpr, backbone = cfg["n"], cfg["cpr"], cfg["backbone"]
     key = cfg["key"]
@@ -157,6 +171,8 @@ def load_model_for_eval(
 
     # ── Val split + anatomy map ───────────────────────────────────────────
     subj_anatomy = build_subj_anatomy_map(data_root, n)
+
+    # scale_factor: 훈련과 동일하게 재현 (train split 첫 배치 기준)
     full_ds = SynthRad2025(
         root=f"{data_root}/dataset/train/n{n}",
         modality=["cbct", "ct"], anatomy=["AB", "HN", "TH"],
@@ -168,8 +184,6 @@ def load_model_for_eval(
         full_ds, [n_train, n_val],
         generator=torch.Generator().manual_seed(seed),
     )
-
-    # ── scale_factor (훈련과 동일: shuffle=True, seed=42 첫 배치) ─────────
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
         num_workers=num_workers, pin_memory=(device.type == "cuda"),
@@ -191,9 +205,10 @@ def load_model_for_eval(
     for p in vdm.parameters():
         p.requires_grad_(False)
 
-    val_loader = DataLoader(
-        val_ds, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=(device.type == "cuda"),
+    val_loader = build_val_loader(
+        data_root, n, val_ratio=val_ratio, seed=seed,
+        batch_size=batch_size, num_workers=num_workers,
+        pin_memory=(device.type == "cuda"),
     )
 
     return dict(
@@ -217,7 +232,7 @@ def evaluate_model(
     compute_fid: bool = True,
 ) -> tuple[list[dict], float]:
     """Returns (rows, fid_value). fid_value is nan if compute_fid=False."""
-    from stage2_vdm import _prepare_cond, sample_conditional
+    from train.stage2_vdm import _prepare_cond, sample_conditional
 
     ct_ae        = loaded["ct_ae"]
     cbct_ae      = loaded["cbct_ae"]
@@ -252,6 +267,79 @@ def evaluate_model(
             print(f"  [range] ct_gen : [{ct_gen.min():.4f}, {ct_gen.max():.4f}]")
             print(f"  [range] ct_gt  : [{ct_gt.min():.4f}, {ct_gt.max():.4f}]")
             first_batch = False
+
+        if compute_fid:
+            feats_fake.append(inception_feats(ct_gen, inception))
+            feats_real.append(inception_feats(ct_gt,  inception))
+
+        for i in range(ct_gen.shape[0]):
+            sid = subj_ids[i]
+            rows.append({
+                "model"   : key,
+                "anatomy" : subj_anatomy.get(sid, "UNKNOWN"),
+                "subj_id" : sid,
+                "psnr"    : compute_psnr(ct_gen[i:i+1], ct_gt[i:i+1]),
+                "ssim"    : compute_ssim(ct_gen[i:i+1], ct_gt[i:i+1]),
+                "mse"     : compute_mse(ct_gen[i:i+1],  ct_gt[i:i+1]),
+            })
+
+    if compute_fid and feats_fake:
+        fid_val = fid_m(torch.vstack(feats_fake), torch.vstack(feats_real)).item()
+    else:
+        fid_val = float("nan")
+
+    return rows, fid_val
+
+
+# ---------------------------------------------------------------------------
+# Gen-file-based metric computation (모델 로딩 없이 .mha에서 바로 계산)
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def evaluate_from_gen(
+    cfg: dict,
+    gen_dir: pathlib.Path,
+    data_root: str,
+    device: torch.device,
+    val_ratio: float = 0.2,
+    seed: int = 42,
+    batch_size: int = 8,
+    num_workers: int = 4,
+    compute_fid: bool = True,
+) -> tuple[list[dict], float]:
+    """gen_dir/{key}/{subj_id}.mha + meta.json 로드 → PSNR/SSIM/MSE/FID 계산."""
+    key       = cfg["key"]
+    n         = cfg["n"]
+    mid       = n // 2
+    model_dir = gen_dir / key
+
+    meta_path = model_dir / "meta.json"
+    with open(meta_path) as f:
+        subj_anatomy: dict[str, str] = json.load(f)
+
+    val_loader = build_val_loader(
+        data_root, n, val_ratio=val_ratio, seed=seed,
+        batch_size=batch_size, num_workers=num_workers,
+        pin_memory=(device.type == "cuda"),
+    )
+
+    inception = build_inception(device) if compute_fid else None
+    fid_m     = FIDMetric() if compute_fid else None
+    feats_real, feats_fake = [], []
+
+    rows = []
+    for batch in tqdm(val_loader, desc=key, leave=False):
+        ct_img   = batch["ct"]
+        subj_ids = batch["subj_id"]
+        ct_gt    = ct_img[:, mid:mid+1].float()
+
+        # gen .mha 로드 → (B, 1, H, W) tensor
+        gen_arrs = [
+            torch.from_numpy(load_mha(model_dir / f"{sid}.mha")).unsqueeze(0)
+            for sid in subj_ids
+        ]
+        ct_gen = torch.stack(gen_arrs, dim=0).to(device)         # (B, 1, H, W)
+        ct_gt  = ct_gt.to(device)
 
         if compute_fid:
             feats_fake.append(inception_feats(ct_gen, inception))
@@ -351,9 +439,11 @@ def save_boxplots(df: "pd.DataFrame", output_dir: str) -> None:
 def get_args():
     p = argparse.ArgumentParser(description="Stage2 VDM 전체 ablation 평가")
     p.add_argument("--data_root",       type=str,   default="/home/dministrator/s2025")
-    p.add_argument("--ckpt_base",       type=str,   default="checkpoints_임베딩1/stage2_vdm")
-    p.add_argument("--vqvae_base",      type=str,   default="checkpoints_임베딩1/stage1_vqvae")
+    p.add_argument("--ckpt_base",       type=str,   default="checkpoints/stage2_vdm")
+    p.add_argument("--vqvae_base",      type=str,   default="checkpoints/stage1_vqvae")
     p.add_argument("--output_dir",      type=str,   default="eval_results")
+    p.add_argument("--gen_dir",         type=str,   default=None,
+                   help="eval_gen.py 출력 디렉토리. 지정 시 inference 생략하고 .mha에서 metric 계산.")
     p.add_argument("--device",          type=int,   default=0)
     p.add_argument("--n_sample_steps",  type=int,   default=200)
     p.add_argument("--batch_size",      type=int,   default=8)
@@ -372,26 +462,38 @@ def main():
     all_rows: list[dict] = []
     fid_per_model: dict[str, float] = {}
     compute_fid = not args.no_fid
+    use_gen     = args.gen_dir is not None
+    gen_dir     = pathlib.Path(args.gen_dir) if use_gen else None
 
     for cfg in MODEL_CONFIGS:
         print(f"\n>>> {cfg['key']}")
         try:
-            loaded = load_model_for_eval(
-                cfg=cfg,
-                data_root=args.data_root,
-                ckpt_base=args.ckpt_base,
-                vqvae_base=args.vqvae_base,
-                device=device,
-                val_ratio=args.val_ratio,
-                seed=args.seed,
-                batch_size=args.batch_size,
-                num_workers=args.num_workers,
-            )
-            rows, fid_val = evaluate_model(
-                cfg, loaded, device,
-                n_sample_steps=args.n_sample_steps,
-                compute_fid=compute_fid,
-            )
+            if use_gen:
+                rows, fid_val = evaluate_from_gen(
+                    cfg, gen_dir, args.data_root, device,
+                    val_ratio=args.val_ratio,
+                    seed=args.seed,
+                    batch_size=args.batch_size,
+                    num_workers=args.num_workers,
+                    compute_fid=compute_fid,
+                )
+            else:
+                loaded = load_model_for_eval(
+                    cfg=cfg,
+                    data_root=args.data_root,
+                    ckpt_base=args.ckpt_base,
+                    vqvae_base=args.vqvae_base,
+                    device=device,
+                    val_ratio=args.val_ratio,
+                    seed=args.seed,
+                    batch_size=args.batch_size,
+                    num_workers=args.num_workers,
+                )
+                rows, fid_val = evaluate_model(
+                    cfg, loaded, device,
+                    n_sample_steps=args.n_sample_steps,
+                    compute_fid=compute_fid,
+                )
             all_rows.extend(rows)
             fid_per_model[cfg["key"]] = fid_val
             df_m = pd.DataFrame(rows)
