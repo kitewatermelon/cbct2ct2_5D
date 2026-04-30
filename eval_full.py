@@ -11,7 +11,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, random_split
 from monai.metrics import PSNRMetric, SSIMMetric
+from monai.metrics.fid import FIDMetric
 from monai.utils import set_determinism
+from torchvision.models import inception_v3
 from tqdm.auto import tqdm
 
 from data.synthrad2025 import SynthRad2025, build_transforms
@@ -46,6 +48,20 @@ MODEL_CONFIGS: list[dict] = [
 
 _psnr_metric = PSNRMetric(max_val=1.0)
 _ssim_metric = SSIMMetric(data_range=1.0, spatial_dims=2)
+
+
+def build_inception(device: torch.device):
+    m = inception_v3(pretrained=True, transform_input=False).to(device)
+    m.fc = torch.nn.Identity()
+    m.eval()
+    return m
+
+
+@torch.no_grad()
+def inception_feats(x: torch.Tensor, model) -> torch.Tensor:
+    """x: (B, 1, H, W) in [0, 1] → InceptionV3 features."""
+    x = x.clamp(0.0, 1.0).repeat(1, 3, 1, 1)
+    return model(x).flatten(1)
 
 
 def compute_psnr(pred: torch.Tensor, target: torch.Tensor) -> float:
@@ -198,7 +214,9 @@ def evaluate_model(
     loaded: dict,
     device: torch.device,
     n_sample_steps: int = 200,
-) -> list[dict]:
+    compute_fid: bool = True,
+) -> tuple[list[dict], float]:
+    """Returns (rows, fid_value). fid_value is nan if compute_fid=False."""
     from stage2_vdm import _prepare_cond, sample_conditional
 
     ct_ae        = loaded["ct_ae"]
@@ -212,7 +230,12 @@ def evaluate_model(
     mid          = n // 2
     key          = cfg["key"]
 
+    inception = build_inception(device) if compute_fid else None
+    fid_m     = FIDMetric() if compute_fid else None
+    feats_real, feats_fake = [], []
+
     rows = []
+    first_batch = True
     for batch in tqdm(val_loader, desc=key, leave=False):
         ct_img   = batch["ct"].to(device)
         cbct_img = batch["cbct"].to(device)
@@ -225,6 +248,15 @@ def evaluate_model(
         ct_gen    = ct_ae.decode_stage_2_outputs(sampled_z / scale_factor).float()
         ct_gt     = ct_img[:, mid:mid+1].float()
 
+        if first_batch:
+            print(f"  [range] ct_gen : [{ct_gen.min():.4f}, {ct_gen.max():.4f}]")
+            print(f"  [range] ct_gt  : [{ct_gt.min():.4f}, {ct_gt.max():.4f}]")
+            first_batch = False
+
+        if compute_fid:
+            feats_fake.append(inception_feats(ct_gen, inception))
+            feats_real.append(inception_feats(ct_gt,  inception))
+
         for i in range(ct_gen.shape[0]):
             sid = subj_ids[i]
             rows.append({
@@ -235,14 +267,20 @@ def evaluate_model(
                 "ssim"    : compute_ssim(ct_gen[i:i+1], ct_gt[i:i+1]),
                 "mse"     : compute_mse(ct_gen[i:i+1],  ct_gt[i:i+1]),
             })
-    return rows
+
+    if compute_fid and feats_fake:
+        fid_val = fid_m(torch.vstack(feats_fake), torch.vstack(feats_real)).item()
+    else:
+        fid_val = float("nan")
+
+    return rows, fid_val
 
 
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
 
-def save_results(rows: list[dict], output_dir: str) -> None:
+def save_results(rows: list[dict], fid_per_model: dict[str, float], output_dir: str) -> None:
     out = pathlib.Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -255,6 +293,11 @@ def save_results(rows: list[dict], output_dir: str) -> None:
     )
     summary.columns = ["_".join(c) for c in summary.columns]
     summary = summary.reset_index()
+
+    # FID는 모델 단위이므로 anatomy에 무관하게 merge
+    fid_df = pd.DataFrame([{"model": k, "fid": v} for k, v in fid_per_model.items()])
+    summary = summary.merge(fid_df, on="model", how="left")
+
     summary.to_csv(out / "summary_stats.csv", index=False)
     print(f"[저장] {out/'raw_metrics.csv'}  ({len(df)}행)")
     print(f"[저장] {out/'summary_stats.csv'}")
@@ -317,6 +360,7 @@ def get_args():
     p.add_argument("--num_workers",     type=int,   default=4)
     p.add_argument("--val_ratio",       type=float, default=0.2)
     p.add_argument("--seed",            type=int,   default=42)
+    p.add_argument("--no_fid",          action="store_true", help="FID 계산 생략")
     return p.parse_args()
 
 
@@ -326,6 +370,9 @@ def main():
     set_determinism(seed=args.seed)
 
     all_rows: list[dict] = []
+    fid_per_model: dict[str, float] = {}
+    compute_fid = not args.no_fid
+
     for cfg in MODEL_CONFIGS:
         print(f"\n>>> {cfg['key']}")
         try:
@@ -340,8 +387,13 @@ def main():
                 batch_size=args.batch_size,
                 num_workers=args.num_workers,
             )
-            rows = evaluate_model(cfg, loaded, device, n_sample_steps=args.n_sample_steps)
+            rows, fid_val = evaluate_model(
+                cfg, loaded, device,
+                n_sample_steps=args.n_sample_steps,
+                compute_fid=compute_fid,
+            )
             all_rows.extend(rows)
+            fid_per_model[cfg["key"]] = fid_val
             df_m = pd.DataFrame(rows)
             for anat in ["AB", "HN", "TH"]:
                 sub = df_m[df_m["anatomy"] == anat]
@@ -349,6 +401,8 @@ def main():
                     continue
                 print(f"    [{anat}] PSNR={sub['psnr'].mean():.2f}±{sub['psnr'].std():.2f}"
                       f"  SSIM={sub['ssim'].mean():.4f}  MSE={sub['mse'].mean():.5f}  n={len(sub)}")
+            if compute_fid:
+                print(f"    [FID] {fid_val:.4f}")
         except Exception as e:
             print(f"    [건너뜀] {e}")
 
@@ -357,7 +411,7 @@ def main():
         return
 
     df = pd.DataFrame(all_rows)
-    save_results(all_rows, args.output_dir)
+    save_results(all_rows, fid_per_model, args.output_dir)
     save_boxplots(df, args.output_dir)
     print(f"\n완료: {args.output_dir}/")
 

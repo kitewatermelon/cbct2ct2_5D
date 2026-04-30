@@ -113,7 +113,7 @@ def test_evaluate_model_output_schema():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     cfg = {"key": "uvit_n5_cpr4", "backbone": "uvit", "n": 5, "cpr": 4}
     loaded = load_model_for_eval(cfg, data_root, ckpt_base, vqvae_base, device)
-    rows = evaluate_model(cfg, loaded, device, n_sample_steps=10)
+    rows, fid_val = evaluate_model(cfg, loaded, device, n_sample_steps=10)
 
     import pandas as pd
     df = pd.DataFrame(rows)
@@ -123,6 +123,7 @@ def test_evaluate_model_output_schema():
     assert (df["psnr"] > 0).all()
     assert (df["ssim"].between(-1, 1)).all()
     assert (df["mse"] >= 0).all()
+    assert isinstance(fid_val, float)
 
 
 from eval_full import save_results
@@ -136,8 +137,9 @@ def test_save_results_creates_files():
         {"model":"uvit_n5_cpr4","anatomy":"AB","subj_id":"s001","psnr":33.0,"ssim":0.92,"mse":0.0008},
         {"model":"uvit_n5_cpr4","anatomy":"HN","subj_id":"s002","psnr":34.0,"ssim":0.93,"mse":0.0007},
     ]
+    fid_per_model = {"uvit_n1_cpr4": 12.3, "uvit_n5_cpr4": 10.5}
     with tempfile.TemporaryDirectory() as tmpdir:
-        save_results(rows, output_dir=tmpdir)
+        save_results(rows, fid_per_model, output_dir=tmpdir)
         assert os.path.exists(os.path.join(tmpdir, "raw_metrics.csv"))
         assert os.path.exists(os.path.join(tmpdir, "summary_stats.csv"))
         df = pd.read_csv(os.path.join(tmpdir, "raw_metrics.csv"))
@@ -145,6 +147,7 @@ def test_save_results_creates_files():
         summary = pd.read_csv(os.path.join(tmpdir, "summary_stats.csv"))
         assert "psnr_mean" in summary.columns
         assert "ssim_std" in summary.columns
+        assert "fid" in summary.columns
 
 
 from eval_full import save_boxplots
