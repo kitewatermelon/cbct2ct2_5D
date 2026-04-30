@@ -293,3 +293,44 @@ def save_results(rows: list[dict], output_dir: str) -> None:
     summary.to_csv(out / "summary_stats.csv", index=False)
     print(f"[저장] {out/'raw_metrics.csv'}  ({len(df)}행)")
     print(f"[저장] {out/'summary_stats.csv'}")
+
+
+def save_boxplots(df: "pd.DataFrame", output_dir: str) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    out    = pathlib.Path(output_dir)
+    anatms = sorted(df["anatomy"].unique())
+    models = df["model"].unique().tolist()
+    colors = {"AB": "#4C72B0", "HN": "#DD8452", "TH": "#55A868"}
+
+    for metric, ylabel, title in [
+        ("psnr", "PSNR (dB)", "PSNR by Model"),
+        ("ssim", "SSIM",      "SSIM by Model"),
+        ("mse",  "MSE",       "MSE by Model"),
+    ]:
+        fig, ax = plt.subplots(figsize=(12, 5))
+        x_positions = range(len(models))
+        width = 0.25
+        for ai, anat in enumerate(anatms):
+            sub = df[df["anatomy"] == anat]
+            data_per_model = [sub[sub["model"] == m][metric].values for m in models]
+            positions = [x + (ai - 1) * width for x in x_positions]
+            bp = ax.boxplot(
+                data_per_model, positions=positions, widths=width * 0.8,
+                patch_artist=True, manage_ticks=False,
+            )
+            for patch in bp["boxes"]:
+                patch.set_facecolor(colors.get(anat, "gray"))
+                patch.set_alpha(0.7)
+
+        ax.set_xticks(list(x_positions))
+        ax.set_xticklabels(models, rotation=30, ha="right")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        handles = [plt.Rectangle((0,0),1,1, fc=colors.get(a,"gray"), alpha=0.7)
+                   for a in anatms]
+        ax.legend(handles, anatms, title="Anatomy")
+        fig.tight_layout()
+        fig.savefig(out / f"boxplot_{metric}.png", dpi=150)
+        plt.close(fig)
+        print(f"[저장] {out}/boxplot_{metric}.png")

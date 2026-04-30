@@ -144,3 +144,21 @@ def test_save_results_creates_files():
         summary = pd.read_csv(os.path.join(tmpdir, "summary_stats.csv"))
         assert "psnr_mean" in summary.columns
         assert "ssim_std" in summary.columns
+
+
+from eval_full import save_boxplots
+import pandas as pd
+
+def test_save_boxplots_creates_pngs():
+    rows = []
+    for m in ["uvit_n1_cpr4", "uvit_n5_cpr4"]:
+        for a in ["AB", "HN", "TH"]:
+            for i in range(5):
+                rows.append({"model":m,"anatomy":a,"subj_id":f"s{i}",
+                             "psnr":30+i,"ssim":0.9+i*0.01,"mse":0.001-i*0.0001})
+    df = pd.DataFrame(rows)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_boxplots(df, output_dir=tmpdir)
+        assert os.path.exists(os.path.join(tmpdir, "boxplot_psnr.png"))
+        assert os.path.exists(os.path.join(tmpdir, "boxplot_ssim.png"))
+        assert os.path.exists(os.path.join(tmpdir, "boxplot_mse.png"))
