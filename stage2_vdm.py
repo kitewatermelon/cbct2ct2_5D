@@ -102,7 +102,7 @@ def get_args():
                    help="latent scale factor override (default: auto from first batch)")
     p.add_argument("--checkpoint_dir",   type=str,   default="checkpoints_임베딩1/stage2_vdm")
     p.add_argument("--resume",           type=str,   default=None)
-    p.add_argument("--wandb_project",    type=str,   default="cbct2ct-stage2-128-1")
+    p.add_argument("--wandb_project",    type=str,   default="cbct2ct-stage2-128-final")
     p.add_argument("--wandb_entity",     type=str,   default=None)
     p.add_argument("--exp_name",         type=str,   default="vdm_uvit_n9_32")
     return p.parse_args()
@@ -180,6 +180,32 @@ def load_frozen_vqvae(ckpt_path, device, **kwargs):
     for p in ae.parameters():
         p.requires_grad_(False)
     return ae
+
+
+def build_vdm(backbone: str, n: int, cpr: int, latent_shape: tuple,
+              spatial_size: int = 128) -> "VDM":
+    """VDM 인스턴스 생성 (가중치 로드 전). eval_full.py에서 사용."""
+    if backbone == "uvit":
+        net = UViT(
+            img_size=spatial_size // cpr, patch_size=2,
+            in_chans=latent_shape[0], embed_dim=512, depth=11,
+            num_heads=4, conv=True,
+        )
+    else:
+        COND_DIM = latent_shape[0] * latent_shape[1] * latent_shape[2]
+        net = DiffusionModelUNet(
+            spatial_dims=2, in_channels=latent_shape[0], out_channels=latent_shape[0],
+            num_res_blocks=1, channels=(128, 256, 384),
+            attention_levels=(True, True, True), norm_num_groups=8,
+            num_head_channels=(16, 32, 64),
+            with_conditioning=True, cross_attention_dim=COND_DIM,
+            transformer_num_layers=1, use_flash_attention=True,
+        )
+    cfg = SimpleNamespace(
+        noise_schedule="fixed_linear", gamma_min=-5.0,
+        gamma_max=5.0, antithetic_time_sampling=True,
+    )
+    return VDM(model=net, cfg=cfg, ae=None, image_shape=latent_shape, scale_factor=1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -423,7 +449,6 @@ def main():
             embed_dim=args.uvit_embed_dim, depth=args.uvit_depth,
             num_heads=args.uvit_num_heads, conv=True,
         ).to(device)
-        backbone = torch.compile(backbone)  
     else:
         COND_DIM = latent_shape[0] * latent_shape[1] * latent_shape[2]
         backbone = DiffusionModelUNet(

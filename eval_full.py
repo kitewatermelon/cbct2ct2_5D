@@ -128,3 +128,93 @@ def build_subj_anatomy_map(data_root: str, n: int) -> dict[str, str]:
         transform=None,
     )
     return {d.name: d.parent.name for d in full_ds.subject_dirs}
+
+
+# ---------------------------------------------------------------------------
+# Model loading
+# ---------------------------------------------------------------------------
+
+EMBEDDING_DIM   = 1
+NUM_EMBEDDINGS  = 2048
+SPATIAL_SIZE    = 128
+
+def load_model_for_eval(
+    cfg: dict,
+    data_root: str,
+    ckpt_base: str,
+    vqvae_base: str,
+    device: torch.device,
+    val_ratio: float = 0.2,
+    seed: int = 42,
+    batch_size: int = 8,
+    num_workers: int = 4,
+) -> dict:
+    from stage2_vdm import build_vqvae, load_frozen_vqvae, build_vdm
+
+    n, cpr, backbone = cfg["n"], cfg["cpr"], cfg["backbone"]
+    key = cfg["key"]
+
+    # ── VQ-VAE ───────────────────────────────────────────────────────────
+    vqvae_kw = dict(out_channels=1, compress_ratio=cpr,
+                    embedding_dim=EMBEDDING_DIM, num_embeddings=NUM_EMBEDDINGS)
+    ct_ae   = load_frozen_vqvae(
+        f"{vqvae_base}/1_vqvae_ct_n{n}_cpr{cpr}_img128/best.pt",
+        device, in_channels=n, **vqvae_kw,
+    )
+    cbct_ae = load_frozen_vqvae(
+        f"{vqvae_base}/1_vqvae_cbct_n{n}_cpr{cpr}_img128/best.pt",
+        device, in_channels=n, **vqvae_kw,
+    )
+
+    # ── latent shape ─────────────────────────────────────────────────────
+    with torch.no_grad():
+        dummy = torch.zeros(1, n, SPATIAL_SIZE, SPATIAL_SIZE, device=device)
+        latent_shape = tuple(ct_ae.encode_stage_2_inputs(dummy).shape[1:])
+
+    # ── Val split + anatomy map ───────────────────────────────────────────
+    subj_anatomy = build_subj_anatomy_map(data_root, n)
+    full_ds = SynthRad2025(
+        root=f"{data_root}/dataset/train/n{n}",
+        modality=["cbct", "ct"], anatomy=["AB", "HN", "TH"],
+        transform=build_transforms(["cbct", "ct"], spatial_size=(128, 128), augment=False),
+    )
+    n_val   = int(len(full_ds) * val_ratio)
+    n_train = len(full_ds) - n_val
+    train_ds, val_ds = random_split(
+        full_ds, [n_train, n_val],
+        generator=torch.Generator().manual_seed(seed),
+    )
+
+    # ── scale_factor (훈련과 동일: shuffle=True, seed=42 첫 배치) ─────────
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, pin_memory=(device.type == "cuda"),
+        generator=torch.Generator().manual_seed(seed),
+    )
+    with torch.no_grad():
+        first_batch = next(iter(train_loader))
+        _z = ct_ae.encode_stage_2_inputs(first_batch["ct"].to(device))
+        scale_factor = 1.0 / _z.flatten().std().item()
+
+    # ── VDM ──────────────────────────────────────────────────────────────
+    vdm = build_vdm(backbone, n, cpr, latent_shape, SPATIAL_SIZE).to(device)
+    ckpt = torch.load(
+        f"{ckpt_base}/1_vdm_{backbone}_n{n}_cpr{cpr}_img128/latest.pt",
+        map_location=device, weights_only=False,
+    )
+    vdm.load_state_dict(ckpt["model_state_dict"], strict=False)
+    vdm.eval()
+    for p in vdm.parameters():
+        p.requires_grad_(False)
+
+    val_loader = DataLoader(
+        val_ds, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=(device.type == "cuda"),
+    )
+
+    return dict(
+        ct_ae=ct_ae, cbct_ae=cbct_ae, vdm=vdm,
+        scale_factor=scale_factor, val_ds=val_ds,
+        val_loader=val_loader, subj_anatomy=subj_anatomy,
+        latent_shape=latent_shape,
+    )

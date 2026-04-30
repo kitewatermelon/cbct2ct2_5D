@@ -70,3 +70,29 @@ def test_val_split_ratio():
                         transform=None)
     expected_n_val = int(len(full) * 0.2)
     assert len(indices) == expected_n_val
+
+
+from eval_full import load_model_for_eval
+
+def test_load_model_for_eval_keys():
+    import os
+    data_root = os.environ.get("DATA_ROOT", "/home/dministrator/s2025")
+    ckpt_base = "checkpoints_임베딩1/stage2_vdm"
+    vqvae_base = "checkpoints_임베딩1/stage1_vqvae"
+    if not pathlib.Path(ckpt_base).exists():
+        import pytest; pytest.skip("checkpoints not available")
+
+    result = load_model_for_eval(
+        cfg={"key":"uvit_n5_cpr4","backbone":"uvit","n":5,"cpr":4},
+        data_root=data_root,
+        ckpt_base=ckpt_base,
+        vqvae_base=vqvae_base,
+        device=torch.device("cpu"),
+    )
+    assert "ct_ae" in result
+    assert "cbct_ae" in result
+    assert "vdm" in result
+    assert "scale_factor" in result
+    assert "val_ds" in result
+    assert "subj_anatomy" in result
+    assert isinstance(result["scale_factor"], float)
