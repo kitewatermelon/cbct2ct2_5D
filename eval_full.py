@@ -334,3 +334,68 @@ def save_boxplots(df: "pd.DataFrame", output_dir: str) -> None:
         fig.savefig(out / f"boxplot_{metric}.png", dpi=150)
         plt.close(fig)
         print(f"[저장] {out}/boxplot_{metric}.png")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def get_args():
+    p = argparse.ArgumentParser(description="Stage2 VDM 전체 ablation 평가")
+    p.add_argument("--data_root",       type=str,   default="/home/dministrator/s2025")
+    p.add_argument("--ckpt_base",       type=str,   default="checkpoints_임베딩1/stage2_vdm")
+    p.add_argument("--vqvae_base",      type=str,   default="checkpoints_임베딩1/stage1_vqvae")
+    p.add_argument("--output_dir",      type=str,   default="eval_results")
+    p.add_argument("--device",          type=int,   default=0)
+    p.add_argument("--n_sample_steps",  type=int,   default=200)
+    p.add_argument("--batch_size",      type=int,   default=8)
+    p.add_argument("--num_workers",     type=int,   default=4)
+    p.add_argument("--val_ratio",       type=float, default=0.2)
+    p.add_argument("--seed",            type=int,   default=42)
+    return p.parse_args()
+
+
+def main():
+    args   = get_args()
+    device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
+    set_determinism(seed=args.seed)
+
+    all_rows: list[dict] = []
+    for cfg in MODEL_CONFIGS:
+        print(f"\n>>> {cfg['key']}")
+        try:
+            loaded = load_model_for_eval(
+                cfg=cfg,
+                data_root=args.data_root,
+                ckpt_base=args.ckpt_base,
+                vqvae_base=args.vqvae_base,
+                device=device,
+                val_ratio=args.val_ratio,
+                seed=args.seed,
+                batch_size=args.batch_size,
+                num_workers=args.num_workers,
+            )
+            rows = evaluate_model(cfg, loaded, device, n_sample_steps=args.n_sample_steps)
+            all_rows.extend(rows)
+            df_m = pd.DataFrame(rows)
+            for anat in ["AB", "HN", "TH"]:
+                sub = df_m[df_m["anatomy"] == anat]
+                if sub.empty:
+                    continue
+                print(f"    [{anat}] PSNR={sub['psnr'].mean():.2f}±{sub['psnr'].std():.2f}"
+                      f"  SSIM={sub['ssim'].mean():.4f}  MSE={sub['mse'].mean():.5f}  n={len(sub)}")
+        except Exception as e:
+            print(f"    [건너뜀] {e}")
+
+    if not all_rows:
+        print("평가 결과 없음.")
+        return
+
+    df = pd.DataFrame(all_rows)
+    save_results(all_rows, args.output_dir)
+    save_boxplots(df, args.output_dir)
+    print(f"\n완료: {args.output_dir}/")
+
+
+if __name__ == "__main__":
+    main()
