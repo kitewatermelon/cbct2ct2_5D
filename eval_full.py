@@ -222,11 +222,8 @@ def evaluate_model(
         cond   = _prepare_cond(z_cond, backbone)
 
         sampled_z = sample_conditional(vdm, cond, n_sample_steps, device)
-        ct_gen    = ct_ae.decode_stage_2_outputs(sampled_z / scale_factor)
+        ct_gen    = ct_ae.decode_stage_2_outputs(sampled_z / scale_factor).float()
         ct_gt     = ct_img[:, mid:mid+1].float()
-
-        ct_gen = ct_gen.float().clamp(0.0, 1.0)
-        ct_gt  = ct_gt.clamp(0.0, 1.0)
 
         for i in range(ct_gen.shape[0]):
             sid = subj_ids[i]
