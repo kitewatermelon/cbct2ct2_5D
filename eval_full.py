@@ -94,3 +94,37 @@ def compute_mse(pred: torch.Tensor, target: torch.Tensor) -> float:
         MSE value
     """
     return F.mse_loss(pred.float(), target.float()).item()
+
+
+# ---------------------------------------------------------------------------
+# Data split (stage2_vdm.py와 동일한 로직)
+# ---------------------------------------------------------------------------
+
+def build_val_split(
+    data_root: str, n: int, val_ratio: float = 0.2, seed: int = 42,
+) -> list[int]:
+    """val_ds의 원본 full_ds 내 인덱스 목록 반환."""
+    full_ds = SynthRad2025(
+        root=f"{data_root}/dataset/train/n{n}",
+        modality=["cbct", "ct"],
+        anatomy=["AB", "HN", "TH"],
+        transform=build_transforms(["cbct", "ct"], spatial_size=(128, 128), augment=False),
+    )
+    n_val   = int(len(full_ds) * val_ratio)
+    n_train = len(full_ds) - n_val
+    _, val_ds = random_split(
+        full_ds, [n_train, n_val],
+        generator=torch.Generator().manual_seed(seed),
+    )
+    return list(val_ds.indices)
+
+
+def build_subj_anatomy_map(data_root: str, n: int) -> dict[str, str]:
+    """subj_id → anatomy 매핑 딕셔너리 반환."""
+    full_ds = SynthRad2025(
+        root=f"{data_root}/dataset/train/n{n}",
+        modality=["cbct", "ct"],
+        anatomy=["AB", "HN", "TH"],
+        transform=None,
+    )
+    return {d.name: d.parent.name for d in full_ds.subject_dirs}

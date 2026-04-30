@@ -41,3 +41,32 @@ def test_compute_mse_known():
     pred   = torch.zeros(1, 1, 2, 2)
     target = torch.ones(1, 1, 2, 2) * 2.0
     assert abs(compute_mse(pred, target) - 4.0) < 1e-6
+
+
+from eval_full import build_val_split
+
+def test_val_split_reproducible():
+    """같은 seed로 두 번 split하면 동일한 indices가 나와야 한다."""
+    import os
+    data_root = os.environ.get("DATA_ROOT", "/home/dministrator/s2025")
+    root = f"{data_root}/dataset/train/n5"
+    if not pathlib.Path(root).exists():
+        import pytest; pytest.skip("data not available")
+
+    indices_a = build_val_split(data_root=data_root, n=5, val_ratio=0.2, seed=42)
+    indices_b = build_val_split(data_root=data_root, n=5, val_ratio=0.2, seed=42)
+    assert indices_a == indices_b
+
+def test_val_split_ratio():
+    import os
+    data_root = os.environ.get("DATA_ROOT", "/home/dministrator/s2025")
+    root = f"{data_root}/dataset/train/n5"
+    if not pathlib.Path(root).exists():
+        import pytest; pytest.skip("data not available")
+
+    indices = build_val_split(data_root=data_root, n=5, val_ratio=0.2, seed=42)
+    from data.synthrad2025 import SynthRad2025
+    full = SynthRad2025(root=root, modality=["cbct", "ct"], anatomy=["AB","HN","TH"],
+                        transform=None)
+    expected_n_val = int(len(full) * 0.2)
+    assert len(indices) == expected_n_val
