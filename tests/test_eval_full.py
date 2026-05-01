@@ -7,7 +7,7 @@ import pytest
 from eval.eval_full import MODEL_CONFIGS, compute_psnr, compute_ssim, compute_mse
 
 def test_model_configs_count():
-    assert len(MODEL_CONFIGS) == 8
+    assert len(MODEL_CONFIGS) == 9
 
 def test_model_configs_keys():
     keys = {c["key"] for c in MODEL_CONFIGS}
@@ -16,6 +16,7 @@ def test_model_configs_keys():
         "uvit_n7_cpr4", "uvit_n9_cpr4",
         "uvit_n5_cpr2", "uvit_n5_cpr8",
         "unet_n5_cpr4",
+        "cyclegan",
     }
 
 def test_compute_psnr_perfect():

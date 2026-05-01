@@ -44,6 +44,7 @@ MODEL_CONFIGS: list[dict] = [
     {"key": "uvit_n5_cpr2", "backbone": "uvit", "n": 5, "cpr": 2},
     {"key": "uvit_n5_cpr8", "backbone": "uvit", "n": 5, "cpr": 8},
     {"key": "unet_n5_cpr4", "backbone": "unet", "n": 5, "cpr": 4},
+    {"key": "cyclegan",     "type": "cyclegan", "n": 1},
 ]
 
 # ---------------------------------------------------------------------------
@@ -467,6 +468,9 @@ def main():
 
     for cfg in MODEL_CONFIGS:
         print(f"\n>>> {cfg['key']}")
+        if cfg.get("type") == "cyclegan" and not use_gen:
+            print("    [스킵] CycleGAN은 --gen_dir 필요 (eval_gen_cyclegan.py 먼저 실행)")
+            continue
         try:
             if use_gen:
                 rows, fid_val = evaluate_from_gen(
