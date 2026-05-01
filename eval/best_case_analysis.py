@@ -47,7 +47,7 @@ def build_score_df(metrics_csv: str) -> pd.DataFrame:
         df[f"{col}_norm"] = (df[col] - lo) / (hi - lo + 1e-12)
 
     # combined score (MSE는 낮을수록 좋으므로 반전)
-    df["score"] = df["psnr_norm"] + df["ssim_norm"] + (1.0 - df["mse_norm"])
+    df["score"] = df["psnr"]
     return df
 
 
@@ -129,8 +129,8 @@ def visualize_cases(
             gen_n1   = load_gen(gen_dir, MODEL_N1, sid)
 
             imgs = [cbct_img, gen_n1, gen_n5, gt_img]
-            vmin = min(i.min() for i in [gen_n5, gen_n1, gt_img])
-            vmax = max(i.max() for i in [gen_n5, gen_n1, gt_img])
+            vmin = min(i.min() for i in [cbct_img, gen_n5, gen_n1, gt_img])
+            vmax = max(i.max() for i in [cbct_img, gen_n5, gen_n1, gt_img])
 
             for col_idx, img in enumerate(imgs):
                 ax = axes[row_idx, col_idx]
@@ -163,7 +163,7 @@ def get_args():
     p.add_argument("--gen_dir",      type=str, default="eval_results/gen")
     p.add_argument("--data_root",    type=str, default="/home/dministrator/s2025")
     p.add_argument("--output_dir",   type=str, default="eval_results/best_case")
-    p.add_argument("--top_k",        type=int, default=3)
+    p.add_argument("--top_k",        type=int, default=10)
     p.add_argument("--val_ratio",    type=float, default=0.2)
     p.add_argument("--seed",         type=int, default=42)
     p.add_argument("--batch_size",   type=int, default=8)

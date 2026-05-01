@@ -46,11 +46,12 @@ def classify_tissue(hu: np.ndarray) -> np.ndarray:
     return out
 
 
-def hu_errors(pred_hu: np.ndarray, gt_hu: np.ndarray) -> dict:
-    err = pred_hu - gt_hu
+def _hu_errors(pred: np.ndarray, gt: np.ndarray) -> dict:
+    """MAE, MAE std, bias를 반환 (RMSE 제외)."""
+    err  = pred - gt
+    abse = np.abs(err)
     return {
-        "mae"  : float(np.abs(err).mean()),
-        "rmse" : float(np.sqrt((err ** 2).mean())),
-        "bias" : float(err.mean()),
-        "std"  : float(err.std()),
+        "MAE"     : float(np.mean(abse)),
+        "MAE_std" : float(np.std(abse)),
+        "bias"    : float(np.mean(err)),
     }

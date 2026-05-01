@@ -9,8 +9,8 @@ Reviewer comment:
 
 Outputs (in --output_dir):
   hu_histogram.png          — HU distribution overlay (gen vs GT per model)
-  hu_error_stats.csv        — MAE / RMSE / bias per model × anatomy
-  hu_tissue_error_stats.csv — MAE / RMSE / bias per model × tissue type
+  hu_error_stats.csv        — MAE / MAE_std / bias per model × anatomy
+  hu_tissue_error_stats.csv — MAE / MAE_std / bias per model × tissue type
 
 --gen_dir 지정 시 eval_gen.py가 저장한 .mha에서 로드 (모델 로딩·inference 불필요).
 미지정 시 eval_full.load_model_for_eval을 통해 모델 로드 후 inference.
@@ -30,7 +30,7 @@ from eval.eval_full import (
     MODEL_CONFIGS, load_model_for_eval, build_val_loader,
     EMBEDDING_DIM, NUM_EMBEDDINGS, SPATIAL_SIZE,
 )
-from utils.hu import HU_MIN, HU_MAX, TISSUES, to_hu, tissue_mask, hu_errors
+from utils.hu import HU_MIN, HU_MAX, TISSUES, to_hu, tissue_mask, _hu_errors
 from utils.mha import load_mha
 
 # ---------------------------------------------------------------------------
@@ -101,7 +101,7 @@ def collect_hu(cfg: dict, loaded: dict, device: torch.device,
     scale_factor = loaded["scale_factor"]
     val_loader   = loaded["val_loader"]
     subj_anatomy = loaded["subj_anatomy"]
-    backbone     = cfg["backbone"]      # load_model_for_eval에 없으므로 cfg에서
+    backbone     = cfg["backbone"]
     n            = cfg["n"]
     mid          = n // 2
 
@@ -134,8 +134,8 @@ def collect_hu(cfg: dict, loaded: dict, device: torch.device,
 # ---------------------------------------------------------------------------
 
 def plot_hu_histograms(all_data: dict[str, list], output_dir: pathlib.Path):
-    models   = list(all_data.keys())
-    bins     = np.linspace(HU_MIN, HU_MAX, 200)
+    models    = list(all_data.keys())
+    bins      = np.linspace(HU_MIN, HU_MAX, 200)
     fig, axes = plt.subplots(1, len(models), figsize=(5 * len(models), 4), sharey=False)
     if len(models) == 1:
         axes = [axes]
@@ -174,7 +174,7 @@ def compute_anatomy_stats(all_data: dict[str, list]) -> pd.DataFrame:
             by_anat[a][1].append(r["gt_hu"])
         for anat, (preds, gts) in by_anat.items():
             rows.append({"model": key, "anatomy": anat,
-                         **hu_errors(np.concatenate(preds), np.concatenate(gts))})
+                         **_hu_errors(np.concatenate(preds), np.concatenate(gts))})
     return pd.DataFrame(rows)
 
 
@@ -191,7 +191,7 @@ def compute_tissue_stats(all_data: dict[str, list]) -> pd.DataFrame:
                 "model"   : key,
                 "tissue"  : tissue,
                 "n_pixels": int(mask.sum()),
-                **hu_errors(pred_all[mask], gt_all[mask]),
+                **_hu_errors(pred_all[mask], gt_all[mask]),
             })
     return pd.DataFrame(rows)
 
