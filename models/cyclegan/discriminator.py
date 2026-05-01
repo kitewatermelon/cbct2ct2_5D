@@ -1,6 +1,5 @@
 """PatchDiscriminator wrapper for CycleGAN."""
 from __future__ import annotations
-import torch.nn as nn
 from monai.networks.nets import PatchDiscriminator
 
 
