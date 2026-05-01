@@ -22,7 +22,7 @@ from tqdm.auto import tqdm
 from data.synthrad2025 import SynthRad2025, build_transforms
 from models.cyclegan.generator import ResNetGenerator
 from models.cyclegan.discriminator import build_discriminator
-from utils.wandb import init_wandb, log_train, log_val, log_images, finish
+from utils.wandb import init_wandb, log_train, log_val, finish
 
 
 # ---------------------------------------------------------------------------
@@ -271,12 +271,16 @@ def main() -> None:
                     "args":               vars(args),
                 }, ckpt_dir / "best.pt")
 
-    # 최종 체크포인트
+    # 최종 체크포인트 (resume 가능하도록 옵티마이저 포함)
     torch.save({
-        "epoch":            args.n_epochs - 1,
-        "G_A2B_state_dict": G_A2B.state_dict(),
-        "G_B2A_state_dict": G_B2A.state_dict(),
-        "args":             vars(args),
+        "epoch":              args.n_epochs - 1,
+        "G_A2B_state_dict":   G_A2B.state_dict(),
+        "G_B2A_state_dict":   G_B2A.state_dict(),
+        "D_A_state_dict":     D_A.state_dict(),
+        "D_B_state_dict":     D_B.state_dict(),
+        "opt_G_state_dict":   opt_G.state_dict(),
+        "opt_D_state_dict":   opt_D.state_dict(),
+        "args":               vars(args),
     }, ckpt_dir / "latest.pt")
 
     finish()
