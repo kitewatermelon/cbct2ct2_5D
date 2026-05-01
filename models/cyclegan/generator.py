@@ -45,6 +45,7 @@ class ResNetGenerator(nn.Module):
                 act="RELU",
                 norm="INSTANCE",
                 bias=False,
+                last_conv_only=True,
             )
             for _ in range(n_blocks)
         ]
