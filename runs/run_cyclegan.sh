@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-python train/cyclegan.py \
+python -m train.cyclegan \
   --data_root /home/dministrator/s2025 \
   --anatomy AB HN TH \
   --spatial_size 128 \

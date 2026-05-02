@@ -146,11 +146,11 @@ def main() -> None:
 
     opt_G = torch.optim.Adam(
         list(G_A2B.parameters()) + list(G_B2A.parameters()),
-        lr=args.lr, betas=(0.5, 0.999),
+        lr=args.lr, betas=(0.9, 0.999),
     )
     opt_D = torch.optim.Adam(
         list(D_A.parameters()) + list(D_B.parameters()),
-        lr=args.lr, betas=(0.5, 0.999),
+        lr=args.lr, betas=(0.9, 0.999),
     )
 
     decay_start = args.n_epochs // 2
